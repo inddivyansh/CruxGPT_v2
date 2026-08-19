@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -32,4 +32,4 @@ class DocumentChunk(Base):
     embedding_json: Mapped[str] = mapped_column(Text)  # JSON list[float]
     embedding_dim: Mapped[int] = mapped_column(Integer)
 
-    created_at: Mapped[datetime] = mapped_column(default=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

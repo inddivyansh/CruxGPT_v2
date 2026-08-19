@@ -5,7 +5,9 @@ Uses SQLite by default for local development, while supporting PostgreSQL
 (e.g. Neon) in production through asyncpg.
 """
 
-from sqlalchemy import inspect, text
+from datetime import datetime
+
+from sqlalchemy import DateTime, inspect, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -17,7 +19,9 @@ from app.config import settings
 
 
 class Base(DeclarativeBase):
-    pass
+    type_annotation_map = {
+        datetime: DateTime(timezone=True),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +122,7 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_user_table)
+        await conn.run_sync(_migrate_timestamp_columns)
 
 
 # ---------------------------------------------------------------------------
@@ -176,5 +181,45 @@ def _migrate_user_table(sync_conn) -> None:
                 text(
                     f"ALTER TABLE users "
                     f"ADD COLUMN {column_name} {column_type}"
+                )
+            )
+
+
+def _migrate_timestamp_columns(sync_conn) -> None:
+    """Convert legacy naive timestamps to PostgreSQL timestamptz columns."""
+
+    if sync_conn.dialect.name != "postgresql":
+        return
+
+    inspector = inspect(sync_conn)
+    timestamp_columns = {
+        "users": ("created_at", "updated_at"),
+        "conversations": ("created_at", "updated_at"),
+        "messages": ("created_at",),
+        "documents": ("created_at", "updated_at"),
+        "document_chunks": ("created_at",),
+        "feedback": ("created_at",),
+        "suggestions": ("created_at",),
+    }
+
+    for table_name, column_names in timestamp_columns.items():
+        if not inspector.has_table(table_name):
+            continue
+
+        columns = {
+            column["name"]: column
+            for column in inspector.get_columns(table_name)
+        }
+
+        for column_name in column_names:
+            column = columns.get(column_name)
+            if column is None or getattr(column["type"], "timezone", False):
+                continue
+
+            sync_conn.execute(
+                text(
+                    f"ALTER TABLE {table_name} "
+                    f"ALTER COLUMN {column_name} TYPE TIMESTAMP WITH TIME ZONE "
+                    f"USING {column_name} AT TIME ZONE 'UTC'"
                 )
             )

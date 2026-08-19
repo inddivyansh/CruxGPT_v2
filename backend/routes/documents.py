@@ -1,8 +1,11 @@
-from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, UploadFile
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import AsyncSessionLocal, get_db
 from app.dependencies import get_current_user
+from app.errors import ConversationNotFoundError
+from models.conversation import Conversation
 from models.user import User
 from schemas.document import DocumentResponse
 from services import document_service
@@ -21,10 +24,19 @@ async def _process_in_background(document_id: str):
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile,
+    conversation_id: str = Form(...),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    document = await document_service.save_upload(db, user.id, file)
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.id == conversation_id, Conversation.user_id == user.id
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise ConversationNotFoundError()
+
+    document = await document_service.save_upload(db, user.id, file, conversation_id)
     background_tasks.add_task(_process_in_background, document.id)
     return document
 

@@ -122,6 +122,7 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_user_table)
+        await conn.run_sync(_migrate_document_conversation_id)
         await conn.run_sync(_migrate_timestamp_columns)
 
 
@@ -183,6 +184,43 @@ def _migrate_user_table(sync_conn) -> None:
                     f"ADD COLUMN {column_name} {column_type}"
                 )
             )
+
+
+def _migrate_document_conversation_id(sync_conn) -> None:
+    """Add the nullable document-to-conversation association to older databases."""
+
+    inspector = inspect(sync_conn)
+
+    if not inspector.has_table("documents"):
+        return
+
+    existing_columns = {
+        column["name"]
+        for column in inspector.get_columns("documents")
+    }
+    if "conversation_id" in existing_columns:
+        return
+
+    if sync_conn.dialect.name == "postgresql":
+        sync_conn.execute(text("ALTER TABLE documents ADD COLUMN conversation_id VARCHAR(36)"))
+        sync_conn.execute(
+            text(
+                "ALTER TABLE documents "
+                "ADD CONSTRAINT fk_documents_conversation_id "
+                "FOREIGN KEY (conversation_id) REFERENCES conversations (id)"
+            )
+        )
+    else:
+        sync_conn.execute(
+            text(
+                "ALTER TABLE documents "
+                "ADD COLUMN conversation_id VARCHAR(36) REFERENCES conversations (id)"
+            )
+        )
+
+    sync_conn.execute(
+        text("CREATE INDEX ix_documents_conversation_id ON documents (conversation_id)")
+    )
 
 
 def _migrate_timestamp_columns(sync_conn) -> None:

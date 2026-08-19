@@ -12,6 +12,9 @@ class Document(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
+    conversation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("conversations.id"), index=True, nullable=True
+    )
 
     filename: Mapped[str] = mapped_column(String(255))  # safe, generated storage filename
     original_filename: Mapped[str] = mapped_column(String(255))  # never trusted for paths

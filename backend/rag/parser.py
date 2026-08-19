@@ -7,6 +7,7 @@ pipeline. Each parser returns a list of ExtractedBlock, which the chunker
 then groups into chunks.
 """
 from dataclasses import dataclass
+from io import BytesIO
 
 import fitz  # PyMuPDF
 from docx import Document as DocxDocument
@@ -21,10 +22,10 @@ class ExtractedBlock:
     section: str | None = None
 
 
-def parse_pdf(file_path: str) -> list[ExtractedBlock]:
+def parse_pdf(file_contents: bytes) -> list[ExtractedBlock]:
     blocks: list[ExtractedBlock] = []
     try:
-        with fitz.open(file_path) as doc:
+        with fitz.open(stream=file_contents, filetype="pdf") as doc:
             for page_index, page in enumerate(doc, start=1):
                 text = page.get_text("text").strip()
                 if text:
@@ -37,10 +38,10 @@ def parse_pdf(file_path: str) -> list[ExtractedBlock]:
     return blocks
 
 
-def parse_docx(file_path: str) -> list[ExtractedBlock]:
+def parse_docx(file_contents: bytes) -> list[ExtractedBlock]:
     blocks: list[ExtractedBlock] = []
     try:
-        doc = DocxDocument(file_path)
+        doc = DocxDocument(BytesIO(file_contents))
         current_section = None
         buffer: list[str] = []
 
@@ -86,10 +87,9 @@ def parse_docx(file_path: str) -> list[ExtractedBlock]:
     return blocks
 
 
-def parse_txt(file_path: str) -> list[ExtractedBlock]:
+def parse_txt(file_contents: bytes) -> list[ExtractedBlock]:
     try:
-        with open(file_path, encoding="utf-8", errors="replace") as f:
-            text = f.read().strip()
+        text = file_contents.decode("utf-8", errors="replace").strip()
     except Exception as exc:
         raise DocumentProcessingFailedError(f"Could not read text file: {exc}") from exc
 
@@ -98,14 +98,14 @@ def parse_txt(file_path: str) -> list[ExtractedBlock]:
     return [ExtractedBlock(text=text)]
 
 
-def parse_document(file_path: str, mime_type: str) -> list[ExtractedBlock]:
+def parse_document(file_contents: bytes, mime_type: str) -> list[ExtractedBlock]:
     if mime_type == "application/pdf":
-        return parse_pdf(file_path)
+        return parse_pdf(file_contents)
     if mime_type in (
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "application/msword",
     ):
-        return parse_docx(file_path)
+        return parse_docx(file_contents)
     if mime_type == "text/plain":
-        return parse_txt(file_path)
+        return parse_txt(file_contents)
     raise DocumentProcessingFailedError(f"Unsupported mime type: {mime_type}")

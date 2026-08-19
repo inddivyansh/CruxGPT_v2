@@ -4,19 +4,25 @@ Document service.
 Handles the full upload -> validate -> store -> extract -> chunk -> embed ->
 index pipeline (spec section 12/13/14/15), plus file-security requirements
 from section 31: safe generated filenames (the original filename is only
-ever used for display), size/type validation, storage outside any web root,
+ever used for display), size/type validation, private object storage,
 and per-user ownership checks before any read/delete.
 """
+import asyncio
 import json
-import os
 import uuid
 
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from supabase import create_client
 
 from app.config import settings
-from app.errors import DocumentNotFoundError, FileTooLargeError, UnsupportedFileTypeError
+from app.errors import (
+    DocumentNotFoundError,
+    DocumentProcessingFailedError,
+    FileTooLargeError,
+    UnsupportedFileTypeError,
+)
 from models.chunk import DocumentChunk
 from models.document import Document
 from rag.chunker import chunk_blocks
@@ -30,34 +36,99 @@ ALLOWED_MIME_TYPES = {
     "text/plain": ".txt",
 }
 
+MAX_DOCUMENT_SIZE_BYTES = 10 * 1024 * 1024
+MAX_CONVERSATION_STORAGE_BYTES = 100 * 1024 * 1024
+
 
 def _validate_upload(file: UploadFile, size: int) -> None:
     if file.content_type not in ALLOWED_MIME_TYPES:
         raise UnsupportedFileTypeError(
             f"'{file.content_type}' is not supported. Allowed types: PDF, DOC, DOCX, TXT."
         )
-    max_bytes = settings.max_file_size_mb * 1024 * 1024
-    if size > max_bytes:
-        raise FileTooLargeError(f"File exceeds the {settings.max_file_size_mb}MB limit.")
+    if size >= MAX_DOCUMENT_SIZE_BYTES:
+        raise FileTooLargeError("File must be smaller than 10 MB. Please upload a file below 10 MB.")
 
 
-async def save_upload(db: AsyncSession, user_id: str, file: UploadFile) -> Document:
+async def _validate_conversation_storage(
+    db: AsyncSession, user_id: str, conversation_id: str, file_size: int
+) -> None:
+    result = await db.execute(
+        select(func.coalesce(func.sum(Document.file_size), 0)).where(
+            Document.conversation_id == conversation_id,
+            Document.user_id == user_id,
+        )
+    )
+    existing_size = result.scalar_one()
+
+    if existing_size + file_size > MAX_CONVERSATION_STORAGE_BYTES:
+        remaining_bytes = max(MAX_CONVERSATION_STORAGE_BYTES - existing_size, 0)
+        remaining_mib = remaining_bytes / (1024 * 1024)
+        raise FileTooLargeError(
+            "Adding this file would exceed this conversation's 100 MB document limit. "
+            f"{remaining_bytes} bytes ({remaining_mib:.2f} MiB) remain."
+        )
+
+
+def _storage_bucket():
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise DocumentProcessingFailedError("Document storage is not configured on the server.")
+
+    client = create_client(settings.supabase_url, settings.supabase_service_role_key)
+    return client.storage.from_(settings.supabase_storage_bucket)
+
+
+async def _upload_storage_object(storage_path: str, contents: bytes, mime_type: str) -> None:
+    def upload() -> None:
+        _storage_bucket().upload(
+            path=storage_path,
+            file=contents,
+            file_options={"content-type": mime_type, "upsert": "false"},
+        )
+
+    await asyncio.to_thread(upload)
+
+
+async def _download_storage_object(storage_path: str) -> bytes:
+    def download() -> bytes:
+        return _storage_bucket().download(storage_path)
+
+    return await asyncio.to_thread(download)
+
+
+async def _delete_storage_object(storage_path: str) -> None:
+    def delete() -> None:
+        _storage_bucket().remove([storage_path])
+
+    try:
+        await asyncio.to_thread(delete)
+    except Exception:
+        pass
+
+
+async def save_upload(
+    db: AsyncSession, user_id: str, file: UploadFile, conversation_id: str
+) -> Document:
     contents = await file.read()
     _validate_upload(file, len(contents))
-
-    os.makedirs(settings.storage_path, exist_ok=True)
+    await _validate_conversation_storage(db, user_id, conversation_id, len(contents))
 
     # Safe, unguessable, generated filename - the original filename is never
-    # used to build a filesystem path (prevents path traversal / collisions).
+    # used to build a storage path (prevents path traversal / collisions).
+    document_id = str(uuid.uuid4())
     ext = ALLOWED_MIME_TYPES[file.content_type]
     safe_filename = f"{uuid.uuid4()}{ext}"
-    storage_path = os.path.join(settings.storage_path, safe_filename)
+    storage_path = f"{user_id}/{conversation_id}/{document_id}/{safe_filename}"
 
-    with open(storage_path, "wb") as f:
-        f.write(contents)
+    try:
+        await _upload_storage_object(storage_path, contents, file.content_type)
+    except Exception as exc:
+        await _delete_storage_object(storage_path)
+        raise DocumentProcessingFailedError("Document upload failed. Please try again.") from exc
 
     document = Document(
+        id=document_id,
         user_id=user_id,
+        conversation_id=conversation_id,
         filename=safe_filename,
         original_filename=file.filename or "document",
         mime_type=file.content_type,
@@ -66,7 +137,12 @@ async def save_upload(db: AsyncSession, user_id: str, file: UploadFile) -> Docum
         storage_path=storage_path,
     )
     db.add(document)
-    await db.commit()
+    try:
+        await db.commit()
+    except Exception:
+        await db.rollback()
+        await _delete_storage_object(storage_path)
+        raise
     await db.refresh(document)
     return document
 
@@ -87,7 +163,8 @@ async def process_document(db: AsyncSession, document_id: str) -> None:
     await db.commit()
 
     try:
-        blocks = parse_document(document.storage_path, document.mime_type)
+        contents = await _download_storage_object(document.storage_path)
+        blocks = parse_document(contents, document.mime_type)
         chunks = chunk_blocks(blocks)
         if not chunks:
             raise ValueError("No chunkable content extracted from document.")
@@ -147,11 +224,7 @@ async def delete_document(db: AsyncSession, user_id: str, document_id: str) -> N
     for chunk in chunk_result.scalars().all():
         await db.delete(chunk)
 
-    if os.path.exists(document.storage_path):
-        try:
-            os.remove(document.storage_path)
-        except OSError:
-            pass  # File already gone / permissions issue - don't block the delete
+    await _delete_storage_object(document.storage_path)
 
     await db.delete(document)
     await db.commit()

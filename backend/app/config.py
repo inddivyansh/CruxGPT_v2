@@ -30,9 +30,10 @@ class Settings(BaseSettings):
     gemini_llm_model: str = "gemini-2.0-flash"
     gemini_embedding_model: str = "models/text-embedding-004"
 
-    # Storage
-    storage_path: str = "./uploads"
-    max_file_size_mb: int = 10
+    # Supabase Storage (server-side only)
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    supabase_storage_bucket: str = "cruxgpt-documents"
 
     # Chunking
     chunk_size_chars: int = 3000

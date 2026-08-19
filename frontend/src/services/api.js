@@ -7,7 +7,7 @@
 //  - normalizing the backend's { error: { code, message } } shape into a JS Error
 //
 // The backend URL is read from an env var (spec section 52), never hard-coded.
-const API_BASE = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
 const ACCESS_TOKEN_KEY = 'crux_access_token';
 const REFRESH_TOKEN_KEY = 'crux_refresh_token';

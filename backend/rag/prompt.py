@@ -15,30 +15,24 @@ import json
 
 from models.chunk import DocumentChunk
 
-SYSTEM_PROMPT = """You are CRuX GPT, an intelligent document analysis assistant for insurance, \
-legal, medical, HR, and compliance documents.
+MAX_CONTEXT_CHARS = 12_000
+MAX_HISTORY_CHARS = 6_000
+MAX_HISTORY_MESSAGE_CHARS = 1_200
 
-Rules you must follow strictly:
-1. Answer using ONLY the retrieved document context provided below. Prefer it over general knowledge.
-2. Never fabricate or invent facts, numbers, clauses, or policy terms that are not present in the context.
-3. If the context does not contain enough information to answer, clearly say so in "answer" and set \
-"insufficient_context" to true. Do not guess.
-4. Clearly distinguish between what the document explicitly states and any reasonable interpretation you \
-are making - if you interpret, say so in the text (e.g. "The document does not say this explicitly, but...").
-5. For insurance/legal/medical questions, do not present interpretations as definitive professional advice. \
-Where relevant, note that a professional should be consulted for final decisions.
-6. Keep the answer concise, structured, and directly useful to the user.
-7. Respond with ONLY a single JSON object, no markdown code fences, no preamble, matching exactly this shape:
+SYSTEM_PROMPT = """You are CRuX GPT, a document analysis assistant for insurance, legal, medical, HR, and compliance documents.
+
+Use only the retrieved context. Do not invent facts, numbers, clauses, or policy terms. If context is insufficient, say so and set "insufficient_context" to true. Clearly label interpretations, do not present insurance/legal/medical interpretations as professional advice, and keep answers concise.
+
+Respond only with one JSON object matching this shape:
 {
-  "answer": "string - the main answer, written for the end user",
-  "decision": "string or null - e.g. 'Likely Covered', 'Likely Not Covered', 'Unclear' - only for \
-claim-evaluation style questions, otherwise null",
+  "answer": "string",
+  "decision": "string or null",
   "conditions": ["string", "..."],
   "exclusions": ["string", "..."],
   "confidence": 0.0,
   "insufficient_context": false
 }
-"confidence" must be a number between 0 and 1 reflecting how well the retrieved context supports the answer.
+"confidence" must be between 0 and 1.
 """
 
 ACTION_HINTS = {
@@ -54,6 +48,26 @@ ACTION_HINTS = {
     "risk_assessment": "The user wants potential risks identified based on the document context.",
     "general": "Answer the general question about the user's documents.",
 }
+
+
+def select_context_chunks(
+    chunks: list[tuple[DocumentChunk, float]], max_chars: int = MAX_CONTEXT_CHARS
+) -> list[tuple[DocumentChunk, float]]:
+    """Keep the highest-ranked non-duplicate chunks within a prompt budget."""
+    selected: list[tuple[DocumentChunk, float]] = []
+    seen_text: set[str] = set()
+    used_chars = 0
+
+    for chunk, score in chunks:
+        normalized_text = " ".join(chunk.text.split())
+        if not normalized_text or normalized_text in seen_text:
+            continue
+        if used_chars + len(chunk.text) > max_chars:
+            continue
+        selected.append((chunk, score))
+        seen_text.add(normalized_text)
+        used_chars += len(chunk.text)
+    return selected
 
 
 def format_context(chunks: list[tuple[DocumentChunk, float]], document_names: dict[str, str]) -> str:
@@ -76,9 +90,19 @@ def format_context(chunks: list[tuple[DocumentChunk, float]], document_names: di
 def format_history(history: list[dict], max_messages: int = 8) -> str:
     if not history:
         return "(No prior conversation.)"
-    trimmed = history[-max_messages:]
-    lines = [f"{m['role'].upper()}: {m['content']}" for m in trimmed]
-    return "\n".join(lines)
+
+    lines: list[str] = []
+    used_chars = 0
+    for message in reversed(history[-max_messages:]):
+        content = message["content"].strip()
+        if len(content) > MAX_HISTORY_MESSAGE_CHARS:
+            content = f"{content[:MAX_HISTORY_MESSAGE_CHARS]}…"
+        line = f"{message['role'].upper()}: {content}"
+        if used_chars + len(line) > MAX_HISTORY_CHARS:
+            break
+        lines.append(line)
+        used_chars += len(line)
+    return "\n".join(reversed(lines)) or "(No prior conversation.)"
 
 
 def build_user_prompt(query: str, action: str, context: str, history: str) -> str:

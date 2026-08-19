@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 import google.generativeai as genai
 
-from app.config import settings
 from app.errors import LLMError
+from rag.gemini import GeminiProviderPool, GeminiProviderUnavailableError, get_gemini_provider_pool
 from rag.prompt import SYSTEM_PROMPT, build_user_prompt
 
 
@@ -39,24 +39,32 @@ def _extract_json(raw_text: str) -> dict:
 
 
 class GeminiGenerator:
-    def __init__(self):
-        if settings.gemini_api_key:
-            genai.configure(api_key=settings.gemini_api_key)
+    def __init__(self, provider_pool: GeminiProviderPool | None = None):
+        from app.config import settings
+
         self.model_name = settings.gemini_llm_model
+        self.provider_pool = provider_pool or get_gemini_provider_pool()
 
     async def generate(self, query: str, action: str, context: str, history: str) -> GenerationResult:
-        if not settings.gemini_api_key:
-            raise LLMError("GEMINI_API_KEY is not configured on the server. Set it in backend/.env.")
-
         user_prompt = build_user_prompt(query=query, action=action, context=context, history=history)
 
         try:
-            model = genai.GenerativeModel(model_name=self.model_name, system_instruction=SYSTEM_PROMPT)
-            response = model.generate_content(
-                user_prompt,
-                generation_config={"response_mime_type": "application/json", "temperature": 0.2},
+            def generate(provider):
+                model = genai.GenerativeModel(model_name=self.model_name, system_instruction=SYSTEM_PROMPT)
+                model._client = provider.client
+                return model.generate_content(
+                    user_prompt,
+                    generation_config={"response_mime_type": "application/json", "temperature": 0.2},
+                )
+
+            response = await self.provider_pool.run(
+                operation="chat",
+                model=self.model_name,
+                call=generate,
             )
             raw_text = response.text
+        except GeminiProviderUnavailableError as exc:
+            raise LLMError("Gemini is temporarily unavailable. Please try again.") from exc
         except Exception as exc:
             raise LLMError(f"Gemini generation call failed: {exc}") from exc
 

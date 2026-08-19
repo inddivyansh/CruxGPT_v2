@@ -27,6 +27,7 @@ class Settings(BaseSettings):
 
     # LLM / Embeddings
     gemini_api_key: str = ""
+    gemini_api_key_secondary: str = ""
     gemini_llm_model: str = "gemini-2.0-flash"
     gemini_embedding_model: str = "models/text-embedding-004"
 

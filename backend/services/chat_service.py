@@ -16,7 +16,7 @@ from models.conversation import Conversation
 from models.document import Document
 from models.message import Message
 from rag.generator import get_generator
-from rag.prompt import format_context, format_history
+from rag.prompt import format_context, format_history, select_context_chunks
 from rag.retriever import build_retrieval_query, retrieve_chunks
 from schemas.chat import ChatRequest, ChatResponse, SourceItem
 
@@ -88,7 +88,8 @@ async def answer_query(db: AsyncSession, user_id: str, payload: ChatRequest) -> 
         doc_result = await db.execute(select(Document).where(Document.id.in_(document_ids)))
         document_names = {d.id: d.original_filename for d in doc_result.scalars().all()}
 
-    context = format_context(scored_chunks, document_names)
+    context_chunks = select_context_chunks(scored_chunks)
+    context = format_context(context_chunks, document_names)
     history_text = format_history(history)
 
     generator = get_generator()
@@ -105,7 +106,7 @@ async def answer_query(db: AsyncSession, user_id: str, payload: ChatRequest) -> 
             text=chunk.text[:400],
             relevance_score=round(score, 4),
         )
-        for chunk, score in scored_chunks
+        for chunk, score in context_chunks
     ]
 
     processing_time = round(time.monotonic() - start, 3)

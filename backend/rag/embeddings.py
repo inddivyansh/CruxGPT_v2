@@ -9,8 +9,8 @@ from abc import ABC, abstractmethod
 
 import google.generativeai as genai
 
-from app.config import settings
 from app.errors import EmbeddingFailedError
+from rag.gemini import GeminiProviderPool, GeminiProviderUnavailableError, get_gemini_provider_pool
 
 
 class EmbeddingService(ABC):
@@ -24,31 +24,62 @@ class EmbeddingService(ABC):
 
 
 class GeminiEmbeddingService(EmbeddingService):
-    def __init__(self):
-        if settings.gemini_api_key:
-            genai.configure(api_key=settings.gemini_api_key)
-        self.model = settings.gemini_embedding_model
+    def __init__(self, provider_pool: GeminiProviderPool | None = None):
+        from app.config import settings
 
-    def _embed(self, text: str, task_type: str) -> list[float]:
-        if not settings.gemini_api_key:
-            raise EmbeddingFailedError(
-                "GEMINI_API_KEY is not configured on the server. Set it in backend/.env."
-            )
+        self.model = settings.gemini_embedding_model
+        self.provider_pool = provider_pool or get_gemini_provider_pool()
+
+    async def _embed(self, text: str, task_type: str) -> list[float]:
         try:
-            result = genai.embed_content(model=self.model, content=text, task_type=task_type)
+            result = await self.provider_pool.run(
+                operation="embedding",
+                model=self.model,
+                call=lambda provider: genai.embed_content(
+                    model=self.model,
+                    content=text,
+                    task_type=task_type,
+                    client=provider.client,
+                ),
+            )
             return result["embedding"]
+        except GeminiProviderUnavailableError as exc:
+            raise EmbeddingFailedError("Gemini embedding service is temporarily unavailable. Please try again.") from exc
         except Exception as exc:
             raise EmbeddingFailedError(f"Gemini embedding call failed: {exc}") from exc
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        # google-generativeai's embed_content is synchronous; batching is done
-        # sequentially here for simplicity/reliability. This is the one spot
-        # to parallelize (asyncio.gather + threadpool) if throughput becomes
-        # a bottleneck at higher document volumes.
-        return [self._embed(text, task_type="retrieval_document") for text in texts]
+        if not texts:
+            return []
+
+        # The installed SDK batches up to 100 requests per API call. Reuse an
+        # embedding for duplicate chunk text while preserving caller ordering.
+        unique_texts = list(dict.fromkeys(texts))
+        try:
+            result = await self.provider_pool.run(
+                operation="embedding",
+                model=self.model,
+                call=lambda provider: genai.embed_content(
+                    model=self.model,
+                    content=unique_texts,
+                    task_type="retrieval_document",
+                    client=provider.client,
+                ),
+            )
+            unique_embeddings = result["embedding"]
+        except GeminiProviderUnavailableError as exc:
+            raise EmbeddingFailedError("Gemini embedding service is temporarily unavailable. Please try again.") from exc
+        except Exception as exc:
+            raise EmbeddingFailedError(f"Gemini embedding call failed: {exc}") from exc
+
+        if len(unique_embeddings) != len(unique_texts):
+            raise EmbeddingFailedError("Gemini returned an unexpected number of document embeddings.")
+
+        embedding_by_text = dict(zip(unique_texts, unique_embeddings))
+        return [embedding_by_text[text] for text in texts]
 
     async def embed_query(self, text: str) -> list[float]:
-        return self._embed(text, task_type="retrieval_query")
+        return await self._embed(text, task_type="retrieval_query")
 
 
 _embedding_service: EmbeddingService | None = None

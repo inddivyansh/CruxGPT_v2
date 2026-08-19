@@ -372,3 +372,27 @@ async def delete_document(db: AsyncSession, user_id: str, document_id: str) -> N
 
     await db.delete(document)
     await db.commit()
+
+
+async def get_storage_usage(
+    db: AsyncSession, user_id: str, conversation_id: str | None = None
+) -> dict:
+    stmt = select(
+        func.coalesce(func.sum(Document.file_size), 0),
+        func.count(Document.id),
+    ).where(Document.user_id == user_id)
+    if conversation_id:
+        stmt = stmt.where(Document.conversation_id == conversation_id)
+
+    result = await db.execute(stmt)
+    row = result.one()
+    used_bytes = int(row[0])
+    doc_count = int(row[1])
+    max_bytes = MAX_CONVERSATION_STORAGE_BYTES
+    remaining_bytes = max(max_bytes - used_bytes, 0)
+    return {
+        "used_bytes": used_bytes,
+        "max_bytes": max_bytes,
+        "remaining_bytes": remaining_bytes,
+        "document_count": doc_count,
+    }

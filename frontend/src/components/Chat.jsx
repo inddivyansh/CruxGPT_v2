@@ -42,6 +42,13 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
     const [pendingAction, setPendingAction] = useState('general');
     const [isLoading, setIsLoading] = useState(false);
     const [attachedFiles, setAttachedFiles] = useState([]); // [{ localId, file, documentId, status, error }]
+    const [storageUsage, setStorageUsage] = useState({
+        used_bytes: 0,
+        max_bytes: 100 * 1024 * 1024,
+        remaining_bytes: 100 * 1024 * 1024,
+        document_count: 0,
+    });
+    const [storageNotice, setStorageNotice] = useState(null);
     const [showSuggestions, setShowSuggestions] = useState(false);
     const [showTaskSwitcher, setShowTaskSwitcher] = useState(false);
     const [loadError, setLoadError] = useState(null);
@@ -57,6 +64,22 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
     useEffect(() => {
         scrollToBottom();
     }, [messages]);
+
+    const refreshStorageUsage = useCallback(async () => {
+        if (!isLoggedIn) return;
+        try {
+            const usage = await api.getStorageUsage(conversationIdRef.current);
+            if (usage && typeof usage.used_bytes === 'number') {
+                setStorageUsage(usage);
+            }
+        } catch {
+            // best-effort
+        }
+    }, [isLoggedIn]);
+
+    useEffect(() => {
+        refreshStorageUsage();
+    }, [refreshStorageUsage, conversationId]);
 
     // --- BACKEND INTEGRATION POINT: hydrate an existing conversation ---
     useEffect(() => {
@@ -75,11 +98,12 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
                         feedback: undefined,
                     }))
                 );
+                refreshStorageUsage();
             } catch (err) {
                 setLoadError(err.message || 'Could not load this conversation.');
             }
         })();
-    }, [initialConversationId]);
+    }, [initialConversationId, refreshStorageUsage]);
 
     useEffect(() => {
         if (initialQuery !== processedQuery.current) {
@@ -213,27 +237,70 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
             return;
         }
 
-        const files = Array.from(event.target.files);
+        const files = Array.from(event.target.files || []);
         event.target.value = ''; // allow re-selecting the same file later
+        setStorageNotice(null);
 
-        const validFiles = [];
+        if (!files.length) return;
+
+        const currentRemaining = storageUsage.remaining_bytes ?? (100 * 1024 * 1024);
+        const remainingMb = (Math.max(0, currentRemaining) / (1024 * 1024)).toFixed(1);
+
+        if (currentRemaining <= 0) {
+            setStorageNotice("Storage limit reached (100 MB). Remove a document to upload another.");
+            return;
+        }
+
+        const validCandidates = [];
 
         files.forEach((file) => {
             const localId = `${file.name}-${Date.now()}-${Math.random()}`;
 
             if (!ACCEPTED_TYPES.includes(file.type)) {
-                setAttachedFiles((prev) => [...prev, { localId, file, status: 'failed', error: 'Unsupported file type' }]);
+                setAttachedFiles((prev) => [
+                    ...prev,
+                    { localId, file, status: 'failed', error: 'Unsupported file type. Allowed: PDF, DOC, DOCX, TXT.' }
+                ]);
                 return;
             }
             if (file.size > MAX_FILE_SIZE) {
-                setAttachedFiles((prev) => [...prev, { localId, file, status: 'failed', error: 'File too large (max 10MB)' }]);
+                const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+                setAttachedFiles((prev) => [
+                    ...prev,
+                    { localId, file, status: 'failed', error: `${sizeMb} MB selected — maximum is 10 MB.` }
+                ]);
                 return;
             }
 
-            validFiles.push({ file, localId });
+            validCandidates.push({ file, localId });
         });
 
-        if (!validFiles.length) return;
+        if (!validCandidates.length) return;
+
+        // Quota check across valid candidates against remaining storage
+        let accumulatedBytes = 0;
+        const toUpload = [];
+
+        for (const candidate of validCandidates) {
+            if (accumulatedBytes + candidate.file.size > currentRemaining) {
+                const totalMb = (candidate.file.size / (1024 * 1024)).toFixed(1);
+                setAttachedFiles((prev) => [
+                    ...prev,
+                    {
+                        localId: candidate.localId,
+                        file: candidate.file,
+                        status: 'failed',
+                        error: `Not enough storage. ${remainingMb} MB remaining, but file is ${totalMb} MB.`
+                    }
+                ]);
+                setStorageNotice(`Not enough storage. You have ${remainingMb} MB remaining, but selected files exceed your quota.`);
+            } else {
+                accumulatedBytes += candidate.file.size;
+                toUpload.push(candidate);
+            }
+        }
+
+        if (!toUpload.length) return;
 
         let uploadConversationId;
         try {
@@ -241,7 +308,7 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
         } catch (err) {
             setAttachedFiles((prev) => [
                 ...prev,
-                ...validFiles.map(({ file, localId }) => ({
+                ...toUpload.map(({ file, localId }) => ({
                     localId,
                     file,
                     status: 'failed',
@@ -251,7 +318,7 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
             return;
         }
 
-        validFiles.forEach(({ file, localId }) => {
+        toUpload.forEach(({ file, localId }) => {
             setAttachedFiles((prev) => [...prev, { localId, file, status: 'uploading' }]);
 
             api
@@ -260,6 +327,8 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
                     setAttachedFiles((prev) =>
                         prev.map((f) => (f.localId === localId ? { ...f, documentId: doc.id, status: 'processing' } : f))
                     );
+                    refreshStorageUsage();
+
                     const cleanup = pollDocumentStatus(doc.id, (updated) => {
                         setAttachedFiles((prev) =>
                             prev.map((f) =>
@@ -272,21 +341,46 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
                                     : f
                             )
                         );
+                        if (updated.status === 'indexed' || updated.status === 'failed') {
+                            refreshStorageUsage();
+                        }
                     });
                     pollCleanupsRef.current[localId] = cleanup;
                 })
                 .catch((err) => {
+                    const rawMsg = err.message || '';
+                    let friendlyError = rawMsg;
+                    if (rawMsg.includes('100 MB') || rawMsg.includes('document limit') || rawMsg.includes('storage')) {
+                        friendlyError = 'Upload would exceed the 100 MB storage limit.';
+                    } else if (rawMsg.includes('10 MB') || rawMsg.includes('smaller than 10')) {
+                        friendlyError = 'File is too large. Maximum file size is 10 MB.';
+                    } else if (!friendlyError) {
+                        friendlyError = 'Upload failed';
+                    }
+
                     setAttachedFiles((prev) =>
-                        prev.map((f) => (f.localId === localId ? { ...f, status: 'failed', error: err.message || 'Upload failed' } : f))
+                        prev.map((f) => (f.localId === localId ? { ...f, status: 'failed', error: friendlyError } : f))
                     );
+                    refreshStorageUsage();
                 });
         });
     };
 
-    const removeFile = (localId) => {
+    const removeFile = async (localId) => {
         pollCleanupsRef.current[localId]?.();
         delete pollCleanupsRef.current[localId];
+
+        const target = attachedFiles.find((f) => f.localId === localId);
         setAttachedFiles((prev) => prev.filter((f) => f.localId !== localId));
+
+        if (target?.documentId) {
+            try {
+                await api.deleteDocument(target.documentId);
+            } catch {
+                // best-effort
+            }
+            refreshStorageUsage();
+        }
     };
 
     const handleSuggestionClick = (suggestion) => {
@@ -313,6 +407,10 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
     const filteredSuggestions = commonQueries.filter(
         (query) => query.toLowerCase().includes(input.toLowerCase()) && input.trim().length > 0
     );
+
+    const usedMb = ((storageUsage.used_bytes || 0) / (1024 * 1024)).toFixed(1);
+    const maxMb = ((storageUsage.max_bytes || (100 * 1024 * 1024)) / (1024 * 1024)).toFixed(0);
+    const isStorageFull = (storageUsage.remaining_bytes ?? (100 * 1024 * 1024)) <= 0;
 
     return (
         <div className="flex-1 flex flex-col w-full max-w-4xl mx-auto h-full relative">
@@ -394,6 +492,31 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
                     </div>
                 )}
 
+                {/* Compact Storage Indicator & Notices */}
+                <div className="flex items-center justify-between text-xs px-1 text-gray-400">
+                    <div className="flex items-center gap-1.5" title={`${usedMb} MB used of ${maxMb} MB conversation storage`}>
+                        <Paperclip className={`w-3.5 h-3.5 ${isStorageFull ? 'text-red-400' : 'text-purple-400'}`} />
+                        <span className={isStorageFull ? 'text-red-400 font-medium' : 'text-gray-300'}>
+                            Storage: {usedMb} MB / {maxMb} MB
+                        </span>
+                        {isStorageFull && (
+                            <span className="text-red-400 font-semibold">(Limit reached)</span>
+                        )}
+                    </div>
+                    {storageNotice && (
+                        <div className="text-xs text-amber-400 flex items-center gap-1">
+                            <span>{storageNotice}</span>
+                            <button
+                                type="button"
+                                onClick={() => setStorageNotice(null)}
+                                className="text-gray-400 hover:text-gray-200 ml-1"
+                            >
+                                <X className="w-3 h-3" />
+                            </button>
+                        </div>
+                    )}
+                </div>
+
                 <div className="relative">
                     <Textarea
                         value={input}
@@ -407,9 +530,28 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
                     />
 
                     <button
-                        onClick={() => (isLoggedIn ? fileInputRef.current?.click() : openLoginModal())}
-                        className="absolute right-12 sm:right-16 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center text-gray-400 hover:text-white transition-colors cursor-pointer z-10"
-                        title="Attach files (PDF, Word, Text)"
+                        onClick={() => {
+                            if (!isLoggedIn) {
+                                openLoginModal();
+                                return;
+                            }
+                            if (isStorageFull) {
+                                setStorageNotice("Storage limit reached (100 MB). Remove a document to upload another.");
+                                return;
+                            }
+                            fileInputRef.current?.click();
+                        }}
+                        disabled={isStorageFull}
+                        className={`absolute right-12 sm:right-16 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center transition-colors z-10 ${
+                            isStorageFull
+                                ? 'text-gray-600 cursor-not-allowed opacity-50'
+                                : 'text-gray-400 hover:text-white cursor-pointer'
+                        }`}
+                        title={
+                            isStorageFull
+                                ? 'Storage limit reached (100 MB). Remove a document to upload another.'
+                                : `Attach files (Max 10 MB per file) · ${usedMb} MB / ${maxMb} MB used`
+                        }
                         type="button"
                     >
                         <Paperclip className="w-4 h-4 sm:w-5 sm:h-5" />
@@ -465,7 +607,7 @@ const AttachedFilePill = ({ entry, onRemove }) => {
             {!isBusy && !isReady && !isFailed && <FileText className="w-4 h-4 text-gray-400" />}
             <span className="text-sm max-w-[10rem] truncate">{file.name}</span>
             <span className="text-xs text-gray-400">{isFailed ? error || 'Failed' : STATUS_LABELS[status] || status}</span>
-            <button onClick={onRemove} className="text-gray-400 hover:text-white">
+            <button onClick={onRemove} className="text-gray-400 hover:text-white cursor-pointer">
                 <X className="w-4 h-4" />
             </button>
         </div>
@@ -499,65 +641,69 @@ const ChatMessage = ({ message, onFeedback }) => {
                 {isAssistant && message.key_points?.length > 0 && (
                     <div className="mt-3 pt-2 border-t border-gray-700/40 text-xs sm:text-sm">
                         <p className="font-semibold text-purple-300 mb-1">Key Points:</p>
-                        <ul className="space-y-1">
-                            {message.key_points.map((pt, i) => (
-                                <li key={i} className="flex items-start gap-1.5 text-gray-200">
-                                    <span className="text-purple-400 mt-0.5">•</span>
-                                    <span>{pt}</span>
-                                </li>
+                        <ul className="list-disc pl-4 space-y-1 text-gray-300">
+                            {message.key_points.map((pt, idx) => (
+                                <li key={idx}>{pt}</li>
                             ))}
                         </ul>
                     </div>
                 )}
 
                 {isAssistant && message.decision && (
-                    <p className="mt-2 text-sm font-semibold text-purple-300">Decision: {message.decision}</p>
+                    <div className="mt-2 text-xs sm:text-sm text-gray-300">
+                        <span className="font-semibold text-purple-300">Decision: </span>
+                        {message.decision}
+                    </div>
                 )}
+
                 {isAssistant && message.conditions?.length > 0 && (
-                    <div className="mt-2 text-xs text-gray-300">
-                        <p className="font-medium text-gray-400">Conditions:</p>
-                        <ul className="list-disc list-inside">
-                            {message.conditions.map((c, i) => <li key={i}>{c}</li>)}
-                        </ul>
+                    <div className="mt-2 text-xs sm:text-sm text-gray-300">
+                        <span className="font-semibold text-purple-300">Conditions: </span>
+                        {message.conditions.join(', ')}
                     </div>
                 )}
+
                 {isAssistant && message.exclusions?.length > 0 && (
-                    <div className="mt-2 text-xs text-gray-300">
-                        <p className="font-medium text-gray-400">Exclusions:</p>
-                        <ul className="list-disc list-inside">
-                            {message.exclusions.map((e, i) => <li key={i}>{e}</li>)}
-                        </ul>
+                    <div className="mt-2 text-xs sm:text-sm text-gray-300">
+                        <span className="font-semibold text-purple-300">Exclusions: </span>
+                        {message.exclusions.join(', ')}
                     </div>
                 )}
+
                 {isAssistant && message.sources?.length > 0 && (
-                    <div className="mt-3 pt-2 border-t border-gray-700/40 text-xs text-gray-400 space-y-1.5">
-                        <p className="font-semibold text-gray-300">Sources</p>
+                    <div className="mt-3 pt-2 border-t border-gray-700/50 text-xs text-gray-400">
+                        <p className="font-semibold text-purple-300 mb-1.5">Sources & Citations:</p>
                         <div className="flex flex-wrap gap-1.5">
-                            {message.sources.map((s, i) => (
-                                <span key={i} className="inline-flex items-center gap-1 bg-gray-900/60 border border-gray-700/60 px-2 py-0.5 rounded text-xs text-gray-300">
-                                    📄 {s.document_name}
-                                    {s.page ? ` (p. ${s.page})` : ''}
-                                    {s.section ? ` — ${s.section}` : ''}
+                            {message.sources.map((src, idx) => (
+                                <span
+                                    key={idx}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-gray-700/50 border border-gray-600/40 text-gray-300 text-[11px]"
+                                >
+                                    <span>📄</span>
+                                    <span className="font-medium">{src.document_name}</span>
+                                    {src.page_number && <span>(p. {src.page_number})</span>}
+                                    {src.section && <span>— {src.section}</span>}
                                 </span>
                             ))}
                         </div>
                     </div>
                 )}
 
-                {isAssistant && onFeedback && (
-                    <div className="flex items-center gap-2 mt-2 pt-2 border-t border-gray-700/30">
-                        <span className="text-xs text-gray-400">Was this helpful?</span>
+                {onFeedback && (
+                    <div className="mt-3 pt-2 border-t border-gray-700/50 flex gap-2 justify-end">
                         <button
                             onClick={() => onFeedback(true)}
-                            className={`p-1 rounded transition-colors ${message.feedback === 'positive' ? 'text-green-400 bg-green-400/20' : 'text-gray-400 hover:text-green-400'}`}
+                            className={`p-1 rounded hover:bg-gray-700 ${message.feedback === 'positive' ? 'text-green-400' : 'text-gray-400'}`}
+                            title="Helpful"
                         >
-                            <ThumbsUp className="w-3 h-3" />
+                            <ThumbsUp className="w-4 h-4" />
                         </button>
                         <button
                             onClick={() => onFeedback(false)}
-                            className={`p-1 rounded transition-colors ${message.feedback === 'negative' ? 'text-red-400 bg-red-400/20' : 'text-gray-400 hover:text-red-400'}`}
+                            className={`p-1 rounded hover:bg-gray-700 ${message.feedback === 'negative' ? 'text-red-400' : 'text-gray-400'}`}
+                            title="Not helpful"
                         >
-                            <ThumbsDown className="w-3 h-3" />
+                            <ThumbsDown className="w-4 h-4" />
                         </button>
                     </div>
                 )}
@@ -566,19 +712,16 @@ const ChatMessage = ({ message, onFeedback }) => {
     );
 };
 
-const LoadingBubble = () => {
-    return (
-        <motion.div layout initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="flex items-start gap-2 sm:gap-4">
-            <div className="flex-shrink-0 w-6 h-6 sm:w-8 sm:h-8 rounded-full flex items-center justify-center bg-purple-500/30">
-                <Bot className="w-3 h-3 sm:w-5 sm:h-5 text-purple-400" />
-            </div>
-            <div className="px-3 py-2 sm:px-5 sm:py-3 rounded-lg flex items-center gap-2 border bg-gray-800/80 border-gray-700/50">
-                <motion.div className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-purple-400 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.8, repeat: Infinity }} />
-                <motion.div className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-purple-400 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.8, delay: 0.1, repeat: Infinity }} />
-                <motion.div className="w-1.5 h-1.5 sm:w-2 sm:h-2 bg-purple-400 rounded-full" animate={{ y: [0, -4, 0] }} transition={{ duration: 0.8, delay: 0.2, repeat: Infinity }} />
-            </div>
-        </motion.div>
-    );
-};
+const LoadingBubble = () => (
+    <div className="flex items-start gap-4">
+        <div className="w-8 h-8 rounded-full bg-purple-500/30 flex items-center justify-center">
+            <Bot className="w-5 h-5 text-purple-400" />
+        </div>
+        <div className="px-5 py-3 rounded-lg bg-gray-800/80 border border-gray-700/50 text-gray-100 flex items-center gap-2">
+            <Loader2 className="w-4 h-4 text-purple-400 animate-spin" />
+            <span className="text-sm">Thinking...</span>
+        </div>
+    </div>
+);
 
 export default Chat;

@@ -14,3 +14,10 @@ class DocumentResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class StorageUsageResponse(BaseModel):
+    used_bytes: int
+    max_bytes: int
+    remaining_bytes: int
+    document_count: int

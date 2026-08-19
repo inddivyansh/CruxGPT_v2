@@ -133,3 +133,61 @@ async def test_list_documents_scoped_to_user(client, registration_payload_factor
 
     assert len(resp_a.json()) == 1
     assert len(resp_b.json()) == 0
+
+
+@pytest.mark.asyncio
+async def test_storage_usage_reporting_and_deletion_refresh(client, registration_payload_factory):
+    """GET /api/documents/storage accurately reflects used and remaining bytes."""
+    token = await _register(client, "storage-test@example.com", registration_payload_factory)
+    conv_id = await _create_conversation(client, token)
+
+    # Initial storage usage is 0
+    resp = await client.get(
+        f"/api/documents/storage?conversation_id={conv_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+    usage = resp.json()
+    assert usage["used_bytes"] == 0
+    assert usage["max_bytes"] == 100 * 1024 * 1024
+    assert usage["remaining_bytes"] == 100 * 1024 * 1024
+    assert usage["document_count"] == 0
+
+    # Upload document
+    doc_content = b"A" * 1024  # 1 KB
+    upload_resp = await client.post(
+        "/api/documents/upload",
+        headers={"Authorization": f"Bearer {token}"},
+        data={"conversation_id": conv_id},
+        files={"file": ("doc.txt", doc_content, "text/plain")},
+    )
+    assert upload_resp.status_code == 201
+    doc_id = upload_resp.json()["id"]
+
+    # Storage usage increases
+    resp_after = await client.get(
+        f"/api/documents/storage?conversation_id={conv_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_after.status_code == 200
+    usage_after = resp_after.json()
+    assert usage_after["used_bytes"] == 1024
+    assert usage_after["remaining_bytes"] == (100 * 1024 * 1024) - 1024
+    assert usage_after["document_count"] == 1
+
+    # Delete document -> storage usage returns to 0
+    del_resp = await client.delete(
+        f"/api/documents/{doc_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert del_resp.status_code == 204
+
+    resp_after_del = await client.get(
+        f"/api/documents/storage?conversation_id={conv_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_after_del.status_code == 200
+    usage_after_del = resp_after_del.json()
+    assert usage_after_del["used_bytes"] == 0
+    assert usage_after_del["remaining_bytes"] == 100 * 1024 * 1024
+    assert usage_after_del["document_count"] == 0

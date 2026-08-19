@@ -1,0 +1,46 @@
+# Local virtual environments
+.venv/
+venv/
+ENV/
+env/
+**/venv/**
+
+# Local sample documents & uploads (not needed in runtime serverless function)
+backend/Documents/
+backend/uploads/
+backend/data/
+**/Documents/**
+**/uploads/**
+**/data/*.db
+**/data/*.sqlite*
+
+# Test files & caches
+backend/tests/
+backend/pytest.ini
+backend/requirements-dev.txt
+.pytest_cache/
+**/.pytest_cache/**
+**/__pycache__/**
+*.pyc
+*.pyo
+*.pyd
+.coverage
+htmlcov/
+
+# Local databases and logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Editor and system files
+.git/
+.github/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Frontend dev artifacts
+frontend/node_modules/
+frontend/coverage/

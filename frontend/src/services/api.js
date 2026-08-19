@@ -186,6 +186,11 @@ export async function deleteDocument(documentId) {
     return request(`/api/documents/${documentId}`, { method: 'DELETE' });
 }
 
+export async function getStorageUsage(conversationId) {
+    const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : '';
+    return request(`/api/documents/storage${query}`, { method: 'GET' });
+}
+
 // --- Chat / Conversations ---------------------------------------------------
 
 export async function sendMessage({ message, conversationId, documentIds = [], action = 'general' }) {

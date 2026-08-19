@@ -7,7 +7,7 @@ from app.dependencies import get_current_user
 from app.errors import ConversationNotFoundError
 from models.conversation import Conversation
 from models.user import User
-from schemas.document import DocumentResponse
+from schemas.document import DocumentResponse, StorageUsageResponse
 from services import document_service
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -44,6 +44,15 @@ async def upload_document(
 @router.get("", response_model=list[DocumentResponse])
 async def list_documents(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     return await document_service.list_user_documents(db, user.id)
+
+
+@router.get("/storage", response_model=StorageUsageResponse)
+async def get_storage_usage(
+    conversation_id: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await document_service.get_storage_usage(db, user.id, conversation_id)
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)

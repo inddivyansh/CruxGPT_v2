@@ -296,25 +296,26 @@ def _migrate_pgvector(sync_conn) -> None:
     if sync_conn.dialect.name != "postgresql":
         return
 
-    inspector = inspect(sync_conn)
-    if not inspector.has_table("document_chunks"):
-        return
-
     try:
         sync_conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
     except Exception:
         pass
 
-    existing_columns = {column["name"] for column in inspector.get_columns("document_chunks")}
-    if "embedding" not in existing_columns:
-        from app.config import settings
+    try:
+        res = sync_conn.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'document_chunks' AND column_name = 'embedding'"
+            )
+        )
+        if not res.fetchone():
+            from app.config import settings
 
-        try:
             sync_conn.execute(
                 text(
                     f"ALTER TABLE document_chunks "
                     f"ADD COLUMN IF NOT EXISTS embedding vector({settings.gemini_embedding_dimensions})"
                 )
             )
-        except Exception:
-            pass
+    except Exception:
+        pass

@@ -319,6 +319,64 @@ async def test_retrieval_explicit_inaccessible_document_raises_404():
             )
 
 
+@pytest.mark.asyncio
+async def test_document_queried_from_different_or_new_conversation_succeeds(monkeypatch):
+    """
+    A document uploaded in conversation A can be queried in a different/new conversation B
+    by the same user without returning DOCUMENT_NOT_FOUND.
+    """
+    from rag.cache import get_response_cache
+    get_response_cache().clear()
+
+    dummy_vec = [0.1] * settings.gemini_embedding_dimensions
+
+    class _MockEmbedService:
+        async def embed_query(self, text):
+            return dummy_vec
+
+        async def embed_documents(self, texts):
+            return [dummy_vec for _ in texts]
+
+    class _MockGenerator:
+        async def generate(self, query, action, context, history):
+            return SimpleNamespace(
+                answer="Cross conversation query successful",
+                summary="Summary",
+                key_points=[],
+                decision=None,
+                conditions=[],
+                exclusions=[],
+                confidence=0.9,
+                insufficient_context=False,
+            )
+
+    monkeypatch.setattr("services.chat_service.get_generator", lambda: _MockGenerator())
+    monkeypatch.setattr("rag.retriever.get_embedding_service", lambda: _MockEmbedService())
+
+    async with AsyncSessionLocal() as db:
+        user = await _create_test_user(db, "cross_conv@test.com")
+        conv_a = await _create_test_conversation(db, user.id, "Upload Conversation A")
+        conv_b = await _create_test_conversation(db, user.id, "Query Conversation B")
+
+        # 1. Upload in conv_a and index
+        doc = await _create_indexed_document(db, user.id, conv_a.id, "Policy terms for cross-conv test", "shared_policy.txt")
+
+        # 2. Query in conv_b explicitly passing doc.id from conv_a -> must succeed!
+        resp = await answer_query(
+            db,
+            user.id,
+            ChatRequest(
+                conversation_id=conv_b.id,
+                message="What are the policy terms?",
+                document_ids=[doc.id],
+            ),
+        )
+        assert resp.answer == "Cross conversation query successful"
+        assert len(resp.sources) >= 1
+        assert resp.sources[0].document_id == doc.id
+        assert resp.sources[0].document_name == "shared_policy.txt"
+
+
 def _make_upload_file(filename: str, content: bytes, content_type: str = "text/plain"):
     class FakeUploadFile:
         def __init__(self):

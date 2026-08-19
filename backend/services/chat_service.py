@@ -65,27 +65,46 @@ async def _last_user_message(db: AsyncSession, conversation_id: str) -> str | No
     return msg.content if msg else None
 
 
-async def _conversation_documents(
+async def _resolve_chat_documents(
     db: AsyncSession,
     user_id: str,
     conversation_id: str,
     requested_document_ids: list[str],
 ) -> list[Document]:
-    """Resolve documents owned by this user and attached to this conversation."""
+    """
+    Resolve documents owned by this user.
+    Does NOT restrict retrieval to the original upload conversation, allowing
+    documents to be freely queried across any of the user's conversations.
+    """
     requested_ids = list(dict.fromkeys(requested_document_ids))
-    stmt = select(Document).where(
-        Document.user_id == user_id,
-        Document.conversation_id == conversation_id,
-    )
     if requested_ids:
-        result = await db.execute(stmt.where(Document.id.in_(requested_ids)))
+        stmt = select(Document).where(
+            Document.user_id == user_id,
+            Document.id.in_(requested_ids),
+        )
+        result = await db.execute(stmt)
         docs = list(result.scalars().all())
         if len(docs) != len(requested_ids):
-            # Match existing no-information-leak behavior for documents.
+            # A requested document ID genuinely does not exist or belongs to another user
             raise DocumentNotFoundError()
         return docs
 
-    result = await db.execute(stmt)
+    # If no explicit document_ids are supplied:
+    # 1. Check if documents were attached in this conversation
+    conv_stmt = select(Document).where(
+        Document.user_id == user_id,
+        Document.conversation_id == conversation_id,
+    )
+    result = await db.execute(conv_stmt)
+    docs = list(result.scalars().all())
+    if docs:
+        return docs
+
+    # 2. Otherwise fall back to all user's available documents
+    user_stmt = select(Document).where(
+        Document.user_id == user_id,
+    ).order_by(Document.created_at.desc())
+    result = await db.execute(user_stmt)
     return list(result.scalars().all())
 
 
@@ -100,13 +119,13 @@ async def answer_query(db: AsyncSession, user_id: str, payload: ChatRequest) -> 
 
     conversation = await _get_or_create_conversation(db, user_id, payload.conversation_id)
 
-    docs = await _conversation_documents(
+    docs = await _resolve_chat_documents(
         db,
         user_id,
         conversation.id,
         payload.document_ids,
     )
-    conversation_document_ids = [d.id for d in docs]
+    active_document_ids = [d.id for d in docs]
     document_names = {d.id: d.original_filename for d in docs}
     document_snapshots = [
         (d.id, d.content_sha256, d.updated_at.isoformat() if d.updated_at else "")
@@ -184,7 +203,7 @@ async def answer_query(db: AsyncSession, user_id: str, payload: ChatRequest) -> 
         db=db,
         user_id=user_id,
         query=retrieval_query,
-        document_ids=conversation_document_ids,
+        document_ids=active_document_ids,
     )
     t_retrieval_end = time.monotonic()
 

@@ -5,7 +5,7 @@
 // button and Home's first-visit prompt open the same modal.
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
-import { X, Loader2 } from 'lucide-react';
+import { X, Loader2, ChevronDown, ChevronUp } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTranslation } from '../contexts/TranslationContext';
 
@@ -28,23 +28,23 @@ const fieldLayoutClasses = {
 };
 
 const onboardingFields = [
-    { name: 'phone', label: 'Phone number', type: 'tel', required: true, pattern: '^\\d{7,15}$', helper: 'Digits only, 7 to 15 characters.' },
-    { name: 'age', label: 'Age', type: 'number', required: true, min: 0, max: 150 },
-    { name: 'gender', label: 'Gender', type: 'select', required: true, options: genderOptions },
-    { name: 'marital_status', label: 'Marital status', type: 'select', required: true, options: maritalStatusOptions },
-    { name: 'citizenship', label: 'Citizenship', type: 'text', required: true },
-    { name: 'occupation', label: 'Occupation / job title', type: 'text', required: true },
-    { name: 'employment_status', label: 'Employment status', type: 'select', required: true, options: employmentStatusOptions },
-    { name: 'annual_income', label: 'Annual income', type: 'text', required: true },
-    { name: 'address', label: 'Residential address', type: 'text', required: true },
-    { name: 'country', label: 'Country', type: 'text', required: true },
-    { name: 'state', label: 'State / Region', type: 'text', required: true },
-    { name: 'city', label: 'City', type: 'text', required: true },
-    { name: 'pin_code', label: 'PIN / ZIP code', type: 'tel', required: true, pattern: '^\\d{4,10}$', helper: 'Digits only, 4 to 10 characters.' },
-    { name: 'smoker_status', label: 'Smoking status', type: 'select', required: true, options: smokerStatusOptions },
-    { name: 'existing_conditions', label: 'Existing medical conditions', type: 'select', required: true, options: yesNoOptions },
-    { name: 'emergency_contact_name', label: 'Emergency contact name', type: 'text', required: true },
-    { name: 'emergency_contact_phone', label: 'Emergency contact phone', type: 'tel', required: true, pattern: '^\\d{7,15}$', helper: 'Digits only, 7 to 15 characters.' },
+    { name: 'phone', label: 'Phone number', type: 'tel', required: false, pattern: '^\\d{7,15}$', helper: 'Digits only, 7 to 15 characters.' },
+    { name: 'age', label: 'Age', type: 'number', required: false, min: 0, max: 150 },
+    { name: 'gender', label: 'Gender', type: 'select', required: false, options: genderOptions },
+    { name: 'marital_status', label: 'Marital status', type: 'select', required: false, options: maritalStatusOptions },
+    { name: 'citizenship', label: 'Citizenship', type: 'text', required: false },
+    { name: 'occupation', label: 'Occupation / job title', type: 'text', required: false },
+    { name: 'employment_status', label: 'Employment status', type: 'select', required: false, options: employmentStatusOptions },
+    { name: 'annual_income', label: 'Annual income', type: 'text', required: false },
+    { name: 'address', label: 'Residential address', type: 'text', required: false },
+    { name: 'country', label: 'Country', type: 'text', required: false },
+    { name: 'state', label: 'State / Region', type: 'text', required: false },
+    { name: 'city', label: 'City', type: 'text', required: false },
+    { name: 'pin_code', label: 'PIN / ZIP code', type: 'tel', required: false, pattern: '^\\d{4,10}$', helper: 'Digits only, 4 to 10 characters.' },
+    { name: 'smoker_status', label: 'Smoking status', type: 'select', required: false, options: smokerStatusOptions },
+    { name: 'existing_conditions', label: 'Existing medical conditions', type: 'select', required: false, options: yesNoOptions },
+    { name: 'emergency_contact_name', label: 'Emergency contact name', type: 'text', required: false },
+    { name: 'emergency_contact_phone', label: 'Emergency contact phone', type: 'tel', required: false, pattern: '^\\d{7,15}$', helper: 'Digits only, 7 to 15 characters.' },
     { name: 'education_level', label: 'Education level', type: 'select', required: false, options: educationOptions },
     { name: 'family_status', label: 'Family status', type: 'text', required: false },
     { name: 'father_name', label: "Father's name", type: 'text', required: false },
@@ -65,6 +65,7 @@ const AuthModal = () => {
     const { t } = useTranslation();
     const [isLogin, setIsLogin] = useState(true);
     const [isSubmitting, setIsSubmitting] = useState(false);
+    const [showOptionalProfile, setShowOptionalProfile] = useState(false);
     const [form, setForm] = useState({
         name: '',
         email: '',
@@ -111,16 +112,14 @@ const AuthModal = () => {
         return (
             <div key={field.name} className={wrapperClassName}>
                 <label htmlFor={fieldId} className="mb-1.5 flex items-center gap-2 text-sm font-medium text-gray-200">
-                    {field.required && <span className="text-red-400">*</span>}
                     <span>{field.label}</span>
-                    {!field.required && <span className="text-xs font-normal text-gray-500">optional</span>}
+                    <span className="text-xs font-normal text-gray-500">optional</span>
                 </label>
 
                 {field.type === 'select' ? (
                     <select
                         id={fieldId}
                         name={field.name}
-                        required={field.required}
                         value={form[field.name]}
                         onChange={handleChange}
                         className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-100"
@@ -135,7 +134,6 @@ const AuthModal = () => {
                         id={fieldId}
                         name={field.name}
                         type={field.type}
-                        required={field.required}
                         min={field.min}
                         max={field.max}
                         pattern={field.pattern}
@@ -156,9 +154,30 @@ const AuthModal = () => {
     const handleSubmit = async (e) => {
         e.preventDefault();
         setIsSubmitting(true);
-        const ok = isLogin
-            ? await login(form.email, form.password)
-            : await register(form);
+
+        let ok = false;
+        if (isLogin) {
+            ok = await login(form.email, form.password);
+        } else {
+            const payload = {
+                name: form.name.trim(),
+                email: form.email.trim(),
+                password: form.password,
+            };
+            for (const [key, value] of Object.entries(form)) {
+                if (key === 'name' || key === 'email' || key === 'password') continue;
+                if (value !== '' && value !== null && value !== undefined) {
+                    if (key === 'age' || key === 'dependents_count') {
+                        const num = parseInt(value, 10);
+                        if (!isNaN(num)) payload[key] = num;
+                    } else {
+                        payload[key] = typeof value === 'string' ? value.trim() : value;
+                    }
+                }
+            }
+            ok = await register(payload);
+        }
+
         setIsSubmitting(false);
         if (ok) {
             setForm({
@@ -197,6 +216,7 @@ const AuthModal = () => {
                 nominee_name: '',
                 nominee_relation: '',
             });
+            setShowOptionalProfile(false);
         }
     };
 
@@ -272,30 +292,52 @@ const AuthModal = () => {
                             className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
                         />
                     </div>
+
                     {!isLogin && (
-                        <>
-                            <div>
-                                <label htmlFor="signup-organization" className="mb-1.5 flex items-center gap-2 text-sm font-medium text-gray-200">
-                                    <span>Organization</span>
-                                    <span className="text-xs font-normal text-gray-500">optional</span>
-                                </label>
-                                <input
-                                    id="signup-organization"
-                                    name="organization"
-                                    type="text"
-                                    placeholder="Organization"
-                                    value={form.organization}
-                                    onChange={handleChange}
-                                    className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                                />
-                            </div>
-                            <div className="pt-2 border-t border-gray-700/60">
-                                <p className="text-sm font-medium text-gray-200 mb-3">Insurance profile details</p>
-                                <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-                                    {onboardingFields.map(renderField)}
+                        <div className="pt-2 border-t border-gray-700/60">
+                            <button
+                                type="button"
+                                onClick={() => setShowOptionalProfile((prev) => !prev)}
+                                className="w-full flex items-center justify-between p-3.5 rounded-xl bg-gray-800/60 hover:bg-gray-800 border border-gray-700/60 text-left transition-colors cursor-pointer"
+                            >
+                                <div>
+                                    <p className="text-sm font-semibold text-gray-200">
+                                        Add profile information for better results
+                                    </p>
+                                    <p className="text-xs text-gray-400 mt-0.5">
+                                        Optional — you can complete this later.
+                                    </p>
                                 </div>
-                            </div>
-                        </>
+                                {showOptionalProfile ? (
+                                    <ChevronUp className="w-5 h-5 text-purple-400 flex-shrink-0" />
+                                ) : (
+                                    <ChevronDown className="w-5 h-5 text-gray-400 flex-shrink-0" />
+                                )}
+                            </button>
+
+                            {showOptionalProfile && (
+                                <div className="mt-4 space-y-4 pt-2">
+                                    <div>
+                                        <label htmlFor="signup-organization" className="mb-1.5 flex items-center gap-2 text-sm font-medium text-gray-200">
+                                            <span>Organization</span>
+                                            <span className="text-xs font-normal text-gray-500">optional</span>
+                                        </label>
+                                        <input
+                                            id="signup-organization"
+                                            name="organization"
+                                            type="text"
+                                            placeholder="Organization"
+                                            value={form.organization}
+                                            onChange={handleChange}
+                                            className="w-full px-4 py-3 bg-gray-800 border border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                                        />
+                                    </div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                                        {onboardingFields.map(renderField)}
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     )}
 
                     {authError && <p className="text-sm text-red-400">{authError}</p>}

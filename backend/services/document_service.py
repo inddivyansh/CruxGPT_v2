@@ -10,12 +10,16 @@ and per-user ownership checks before any read/delete.
 import asyncio
 import hashlib
 import json
+import logging
+import math
 import uuid
 
 from fastapi import UploadFile
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from supabase import create_client
+
+logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app.errors import (
@@ -280,6 +284,11 @@ async def process_document(db: AsyncSession, document_id: str) -> None:
         reusable_source = await _find_reusable_source_document(db, document)
         if reusable_source is not None:
             source, source_chunks = reusable_source
+            logger.info(
+                "[document_dedup] action=reuse_existing_embeddings source_document_id=%s destination_document_id=%s gemini_calls=0",
+                source.id,
+                document.id,
+            )
             await _copy_reusable_chunks(db, source, source_chunks, document)
             return
 
@@ -288,6 +297,15 @@ async def process_document(db: AsyncSession, document_id: str) -> None:
         chunks = chunk_blocks(blocks)
         if not chunks:
             raise ValueError("No chunkable content extracted from document.")
+
+        unique_chunks_count = len({c.text for c in chunks})
+        batch_count = math.ceil(unique_chunks_count / 100) if unique_chunks_count else 0
+        logger.info(
+            "[document_embedding] action=generate unique_chunks=%d batches=%d model=%s",
+            unique_chunks_count,
+            batch_count,
+            settings.gemini_embedding_model,
+        )
 
         embedding_service = get_embedding_service()
         embeddings = await embedding_service.embed_documents([c.text for c in chunks])

@@ -1,13 +1,11 @@
 """
-Retriever: query -> query embedding -> vector search -> top-K chunks.
+Retriever: query -> query embedding -> vector search -> top-K candidate chunks.
 
-Query rewriting (spec section 41) is intentionally left as a simple, cheap
-heuristic rather than an extra LLM call: it only fires for short
-conversational follow-ups, and just prepends the previous user question for
-retrieval purposes. This avoids doubling LLM latency/cost on every turn
-while still helping pronoun-heavy follow-ups ("what about surgery?") retrieve
-the right chunks. It's the one spot to upgrade to an LLM-based rewrite later
-if retrieval quality demands it.
+Query rewriting is intentionally left as a simple, cheap heuristic rather than
+an extra LLM call: it only fires for short conversational follow-ups, and just
+prepends the previous user question for retrieval purposes. This avoids doubling
+LLM latency/cost on every turn while helping pronoun-heavy follow-ups retrieve
+the right chunks.
 """
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +39,6 @@ async def retrieve_chunks(
         db=db,
         user_id=user_id,
         query_embedding=query_embedding,
-        top_k=top_k or settings.retrieval_top_k,
+        top_k=top_k or settings.retrieval_candidate_pool_k,
         document_ids=document_ids,
     )

@@ -125,6 +125,7 @@ async def init_db():
         await conn.run_sync(_migrate_document_conversation_id)
         await conn.run_sync(_migrate_document_embedding_metadata)
         await conn.run_sync(_migrate_timestamp_columns)
+        await conn.run_sync(_migrate_pgvector)
 
 
 # ---------------------------------------------------------------------------
@@ -288,3 +289,32 @@ def _migrate_timestamp_columns(sync_conn) -> None:
                     f"USING {column_name} AT TIME ZONE 'UTC'"
                 )
             )
+
+
+def _migrate_pgvector(sync_conn) -> None:
+    """Safely prepare pgvector extension and embedding vector column on PostgreSQL."""
+    if sync_conn.dialect.name != "postgresql":
+        return
+
+    inspector = inspect(sync_conn)
+    if not inspector.has_table("document_chunks"):
+        return
+
+    try:
+        sync_conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+    except Exception:
+        pass
+
+    existing_columns = {column["name"] for column in inspector.get_columns("document_chunks")}
+    if "embedding" not in existing_columns:
+        from app.config import settings
+
+        try:
+            sync_conn.execute(
+                text(
+                    f"ALTER TABLE document_chunks "
+                    f"ADD COLUMN IF NOT EXISTS embedding vector({settings.gemini_embedding_dimensions})"
+                )
+            )
+        except Exception:
+            pass

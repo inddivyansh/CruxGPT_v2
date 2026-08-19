@@ -108,11 +108,14 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
                 role: 'assistant',
                 content: response.answer,
                 id: response.message_id,
-                sources: response.sources,
+                summary: response.summary,
+                key_points: response.key_points || [],
+                sources: response.sources || [],
                 decision: response.decision,
-                conditions: response.conditions,
-                exclusions: response.exclusions,
+                conditions: response.conditions || [],
+                exclusions: response.exclusions || [],
                 confidence: response.confidence,
+                insufficient_context: response.insufficient_context,
             },
         ]);
     };
@@ -477,7 +480,35 @@ const ChatMessage = ({ message, onFeedback }) => {
                 {isAssistant ? <Bot className="w-3 h-3 sm:w-5 sm:h-5 text-purple-400" /> : <UserIcon className="w-3 h-3 sm:w-5 sm:h-5 text-gray-300" />}
             </div>
             <div className={`px-3 py-2 sm:px-5 sm:py-3 rounded-lg max-w-[85%] sm:max-w-lg border text-sm sm:text-base ${isAssistant ? 'bg-gray-800/80 border-gray-700/50 text-gray-100' : 'bg-purple-600/30 border-purple-500/50 text-gray-100'}`}>
+                {isAssistant && message.insufficient_context && (
+                    <div className="mb-2 px-2.5 py-1 rounded bg-yellow-500/10 border border-yellow-500/30 text-yellow-300 text-xs font-medium flex items-center gap-1.5">
+                        <AlertCircle className="w-3.5 h-3.5 flex-shrink-0" />
+                        <span>Insufficient document context found to answer fully.</span>
+                    </div>
+                )}
+
+                {isAssistant && message.summary && (
+                    <div className="mb-2.5 px-3 py-1.5 rounded bg-purple-900/30 border border-purple-700/40 text-xs sm:text-sm text-purple-200">
+                        <span className="font-semibold text-purple-300">Summary: </span>
+                        {message.summary}
+                    </div>
+                )}
+
                 <p className="whitespace-pre-wrap break-words">{message.content}</p>
+
+                {isAssistant && message.key_points?.length > 0 && (
+                    <div className="mt-3 pt-2 border-t border-gray-700/40 text-xs sm:text-sm">
+                        <p className="font-semibold text-purple-300 mb-1">Key Points:</p>
+                        <ul className="space-y-1">
+                            {message.key_points.map((pt, i) => (
+                                <li key={i} className="flex items-start gap-1.5 text-gray-200">
+                                    <span className="text-purple-400 mt-0.5">•</span>
+                                    <span>{pt}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
 
                 {isAssistant && message.decision && (
                     <p className="mt-2 text-sm font-semibold text-purple-300">Decision: {message.decision}</p>
@@ -499,15 +530,17 @@ const ChatMessage = ({ message, onFeedback }) => {
                     </div>
                 )}
                 {isAssistant && message.sources?.length > 0 && (
-                    <div className="mt-2 pt-2 border-t border-gray-700/30 text-xs text-gray-400 space-y-1">
-                        <p className="font-medium">Sources</p>
-                        {message.sources.map((s, i) => (
-                            <p key={i}>
-                                {s.document_name}
-                                {s.page ? ` — Page ${s.page}` : ''}
-                                {s.section ? ` — ${s.section}` : ''}
-                            </p>
-                        ))}
+                    <div className="mt-3 pt-2 border-t border-gray-700/40 text-xs text-gray-400 space-y-1.5">
+                        <p className="font-semibold text-gray-300">Sources</p>
+                        <div className="flex flex-wrap gap-1.5">
+                            {message.sources.map((s, i) => (
+                                <span key={i} className="inline-flex items-center gap-1 bg-gray-900/60 border border-gray-700/60 px-2 py-0.5 rounded text-xs text-gray-300">
+                                    📄 {s.document_name}
+                                    {s.page ? ` (p. ${s.page})` : ''}
+                                    {s.section ? ` — ${s.section}` : ''}
+                                </span>
+                            ))}
+                        </div>
                     </div>
                 )}
 

@@ -6,13 +6,9 @@ from retrieved context, say clearly when context is insufficient, distinguish
 fact from interpretation, never present interpretation as definitive
 professional/legal/medical advice, and return structured JSON so the backend
 can validate and shape the response rather than trusting free text.
-
-Note: citations (document/page/section) are attached to the response by our
-own code from the retrieved chunks, not invented by the model - the model
-only needs to write the answer/decision/conditions/exclusions text.
 """
-import json
 from dataclasses import dataclass
+import re
 
 from models.chunk import DocumentChunk
 
@@ -30,20 +26,32 @@ class ContextChunk:
     page_number: int | None
     section: str | None
 
+
 SYSTEM_PROMPT = """You are CRuX GPT, a document analysis assistant for insurance, legal, medical, HR, and compliance documents.
 
-Use only the retrieved context. Do not invent facts, numbers, clauses, or policy terms. If context is insufficient, say so and set "insufficient_context" to true. Clearly label interpretations, do not present insurance/legal/medical interpretations as professional advice, and keep answers concise.
+Use ONLY the retrieved document context. Do NOT use outside knowledge, invent facts, numbers, clauses, or policy terms. If the context does not contain enough information to answer reliably, set "insufficient_context" to true, clearly state in "answer" that the document context is insufficient, and set "key_points" to [].
 
-Respond only with one JSON object matching this shape:
+Rules:
+1. Give a direct answer to the user's question first in "answer".
+2. Provide a 1-2 sentence executive summary in "summary".
+3. Use "key_points" for important supporting details or bullet points from the text.
+4. For claim/policy evaluation, populate "decision", "conditions", and "exclusions" if relevant.
+5. "confidence" must be a float between 0.0 and 1.0.
+6. Return ONLY valid JSON matching this schema, without any markdown formatting or commentary outside the JSON object:
+
 {
-  "answer": "string",
+  "answer": "Direct answer to the question.",
+  "summary": "Short 1-2 sentence summary.",
+  "key_points": [
+    "Important supporting detail 1",
+    "Important supporting detail 2"
+  ],
   "decision": "string or null",
   "conditions": ["string", "..."],
   "exclusions": ["string", "..."],
-  "confidence": 0.0,
+  "confidence": 0.9,
   "insufficient_context": false
 }
-"confidence" must be between 0 and 1.
 """
 
 ACTION_HINTS = {
@@ -61,19 +69,47 @@ ACTION_HINTS = {
 }
 
 
+def _word_tokens(text: str) -> set[str]:
+    """Extract lowercase words of length >= 3 for textual redundancy checking."""
+    return {w.lower() for w in re.findall(r"\b\w{3,}\b", text)}
+
+
+def _is_redundant(candidate_tokens: set[str], selected_tokens_list: list[set[str]], threshold: float = 0.75) -> bool:
+    """Check if candidate text has high token overlap with any already selected chunk."""
+    if not candidate_tokens:
+        return False
+    for existing in selected_tokens_list:
+        if not existing:
+            continue
+        intersection = len(candidate_tokens & existing)
+        overlap = intersection / min(len(candidate_tokens), len(existing))
+        if overlap >= threshold:
+            return True
+    return False
+
+
 def select_context_chunks(
     chunks: list[tuple[DocumentChunk, float]],
     document_names: dict[str, str],
     max_chars: int = MAX_CONTEXT_CHARS,
+    redundancy_threshold: float = 0.75,
 ) -> list[tuple[ContextChunk, float]]:
-    """Keep high-ranked unique chunks within the exact rendered context budget."""
+    """
+    Select diverse, high-ranked unique chunks within the exact rendered context budget,
+    filtering out exact duplicates and near-redundant chunks.
+    """
     selected: list[tuple[ContextChunk, float]] = []
     seen_text: set[str] = set()
+    selected_tokens_list: list[set[str]] = []
     used_chars = 0
 
     for chunk, score in chunks:
         normalized_text = " ".join(chunk.text.split())
         if not normalized_text or normalized_text in seen_text:
+            continue
+
+        candidate_tokens = _word_tokens(chunk.text)
+        if selected_tokens_list and _is_redundant(candidate_tokens, selected_tokens_list, threshold=redundancy_threshold):
             continue
 
         doc_name = document_names.get(chunk.document_id, "Unknown document")
@@ -98,7 +134,9 @@ def select_context_chunks(
         )
         selected.append((context_chunk, score))
         seen_text.add(normalized_text)
+        selected_tokens_list.append(candidate_tokens)
         used_chars += separator_chars + len(header) + 1 + len(prompt_text)
+
     return selected
 
 

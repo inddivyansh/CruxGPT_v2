@@ -25,9 +25,12 @@ class ChatResponse(BaseModel):
     conversation_id: str
     message_id: str
     answer: str
+    summary: str | None = None
+    key_points: list[str] = Field(default_factory=list)
     decision: str | None = None
     conditions: list[str] = Field(default_factory=list)
     exclusions: list[str] = Field(default_factory=list)
     sources: list[SourceItem] = Field(default_factory=list)
     confidence: float | None = None
+    insufficient_context: bool = False
     processing_time: float

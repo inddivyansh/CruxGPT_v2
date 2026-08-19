@@ -572,7 +572,7 @@ async def test_chat_call_counts_exactly_one_query_embedding_and_one_generation(m
         assert len(query_embed_calls) == 1
         assert len(generation_calls) == 1
 
-        # Second question
+        # Second question (different query -> cache miss)
         await answer_query(
             db,
             user.id,
@@ -580,3 +580,228 @@ async def test_chat_call_counts_exactly_one_query_embedding_and_one_generation(m
         )
         assert len(query_embed_calls) == 2
         assert len(generation_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_query_cache_hit_makes_zero_gemini_calls(monkeypatch):
+    """Repeated question within identical document scope is served from cache with 0 Gemini calls."""
+    from rag.cache import get_response_cache
+    get_response_cache().clear()
+
+    query_embed_calls = []
+    generation_calls = []
+
+    dummy_vec = [0.1] * settings.gemini_embedding_dimensions
+
+    class _MockEmbedService:
+        async def embed_query(self, text):
+            query_embed_calls.append(text)
+            return dummy_vec
+
+    class _MockGenerator:
+        async def generate(self, query, action, context, history):
+            generation_calls.append(query)
+            return SimpleNamespace(
+                answer="Direct cached answer",
+                summary="Short cached summary",
+                key_points=["Point 1", "Point 2"],
+                decision="Covered",
+                conditions=["Valid ID"],
+                exclusions=["Cosmetic"],
+                confidence=0.95,
+                insufficient_context=False,
+            )
+
+    monkeypatch.setattr("services.chat_service.get_generator", lambda: _MockGenerator())
+    monkeypatch.setattr("rag.retriever.get_embedding_service", lambda: _MockEmbedService())
+
+    async with AsyncSessionLocal() as db:
+        user = await _create_test_user(db, "cache_hit@test.com")
+        conv = await _create_test_conversation(db, user.id, "CacheConv")
+        await _create_indexed_document(db, user.id, conv.id, "Policy rules and terms", "policy.txt")
+
+        # 1. First invocation: Cache Miss
+        resp1 = await answer_query(
+            db,
+            user.id,
+            ChatRequest(conversation_id=conv.id, message="What are the policy rules?"),
+        )
+        assert resp1.answer == "Direct cached answer"
+        assert resp1.summary == "Short cached summary"
+        assert resp1.key_points == ["Point 1", "Point 2"]
+        assert len(query_embed_calls) == 1
+        assert len(generation_calls) == 1
+
+        # 2. Second invocation with identical question: Cache Hit
+        resp2 = await answer_query(
+            db,
+            user.id,
+            ChatRequest(conversation_id=conv.id, message="What are the policy rules?"),
+        )
+        assert resp2.answer == "Direct cached answer"
+        assert resp2.summary == "Short cached summary"
+        assert resp2.key_points == ["Point 1", "Point 2"]
+        assert len(query_embed_calls) == 1, "Cache hit must make 0 query embedding calls"
+        assert len(generation_calls) == 1, "Cache hit must make 0 generation calls"
+
+
+@pytest.mark.asyncio
+async def test_query_cache_miss_on_different_document_scope(monkeypatch):
+    """Same question in another conversation with different document content misses the cache."""
+    from rag.cache import get_response_cache
+    get_response_cache().clear()
+
+    query_embed_calls = []
+    generation_calls = []
+
+    dummy_vec = [0.1] * settings.gemini_embedding_dimensions
+
+    class _MockEmbedService:
+        async def embed_query(self, text):
+            query_embed_calls.append(text)
+            return dummy_vec
+
+    class _MockGenerator:
+        async def generate(self, query, action, context, history):
+            generation_calls.append(query)
+            return SimpleNamespace(
+                answer=f"Answer for {query}",
+                summary="Summary",
+                key_points=[],
+                decision=None,
+                conditions=[],
+                exclusions=[],
+                confidence=0.8,
+                insufficient_context=False,
+            )
+
+    monkeypatch.setattr("services.chat_service.get_generator", lambda: _MockGenerator())
+    monkeypatch.setattr("rag.retriever.get_embedding_service", lambda: _MockEmbedService())
+
+    async with AsyncSessionLocal() as db:
+        user = await _create_test_user(db, "cache_scope@test.com")
+
+        conv_a = await _create_test_conversation(db, user.id, "Conv A")
+        await _create_indexed_document(db, user.id, conv_a.id, "Content document A", "docA.txt")
+
+        conv_b = await _create_test_conversation(db, user.id, "Conv B")
+        await _create_indexed_document(db, user.id, conv_b.id, "Different content document B", "docB.txt")
+
+        # Question on conv_a
+        await answer_query(
+            db,
+            user.id,
+            ChatRequest(conversation_id=conv_a.id, message="What is the coverage?"),
+        )
+        assert len(query_embed_calls) == 1
+        assert len(generation_calls) == 1
+
+        # Same question on conv_b (different document set -> must miss cache)
+        await answer_query(
+            db,
+            user.id,
+            ChatRequest(conversation_id=conv_b.id, message="What is the coverage?"),
+        )
+        assert len(query_embed_calls) == 2
+        assert len(generation_calls) == 2
+
+
+def test_context_selection_redundancy_removal_and_diversity():
+    """Redundant candidate chunks with high token overlap are filtered to prioritize diverse context."""
+    from rag.prompt import select_context_chunks
+
+    chunk1 = DocumentChunk(
+        id="c1",
+        document_id="doc1",
+        user_id="u1",
+        chunk_index=0,
+        text="The policy premium is payable annually in advance by the insured policyholder.",
+        page_number=1,
+        section="Premium",
+        embedding_json="[]",
+        embedding_dim=0,
+    )
+    chunk2 = DocumentChunk(
+        id="c2",
+        document_id="doc1",
+        user_id="u1",
+        chunk_index=1,
+        # Highly redundant with chunk1
+        text="The policy premium is payable annually in advance by the insured member.",
+        page_number=1,
+        section="Premium",
+        embedding_json="[]",
+        embedding_dim=0,
+    )
+    chunk3 = DocumentChunk(
+        id="c3",
+        document_id="doc1",
+        user_id="u1",
+        chunk_index=2,
+        # Diverse, distinct content
+        text="Maternity expenses are covered after a twenty-four month waiting period from inception.",
+        page_number=2,
+        section="Maternity",
+        embedding_json="[]",
+        embedding_dim=0,
+    )
+
+    candidates = [(chunk1, 0.95), (chunk2, 0.93), (chunk3, 0.88)]
+    doc_names = {"doc1": "policy.pdf"}
+
+    selected = select_context_chunks(candidates, doc_names, max_chars=12000, redundancy_threshold=0.70)
+    selected_texts = [c.text for c, _ in selected]
+
+    assert chunk1.text in selected_texts
+    assert chunk2.text not in selected_texts, "Redundant chunk2 must be pruned"
+    assert chunk3.text in selected_texts, "Diverse chunk3 must be included"
+
+
+@pytest.mark.asyncio
+async def test_structured_generator_parsing_and_fallback(monkeypatch):
+    """Generator correctly extracts structured fields and gracefully handles malformed responses."""
+    from rag.generator import GeminiGenerator
+
+    class _MockPool:
+        def __init__(self, raw_output):
+            self.raw_output = raw_output
+
+        async def run(self, operation, model, call):
+            class _FakeResponse:
+                text = self.raw_output
+            return _FakeResponse()
+
+    # 1. Valid JSON response
+    valid_json = json.dumps({
+        "answer": "Coverage is provided up to $50,000.",
+        "summary": "Policy limits coverage to $50k.",
+        "key_points": ["Annual limit is $50,000", "Includes emergency care"],
+        "decision": "Approved",
+        "conditions": ["Pre-authorization required"],
+        "exclusions": ["Cosmetic procedures"],
+        "confidence": 0.92,
+        "insufficient_context": False,
+    })
+    generator = GeminiGenerator(provider_pool=_MockPool(valid_json))
+    res = await generator.generate(query="What is the limit?", action="general", context="", history="")
+    assert res.answer == "Coverage is provided up to $50,000."
+    assert res.summary == "Policy limits coverage to $50k."
+    assert len(res.key_points) == 2
+    assert res.decision == "Approved"
+    assert res.confidence == 0.92
+    assert res.insufficient_context is False
+
+    # 2. Markdown-fenced JSON response
+    fenced_json = f"```json\n{valid_json}\n```"
+    generator_fenced = GeminiGenerator(provider_pool=_MockPool(fenced_json))
+    res_fenced = await generator_fenced.generate(query="What is the limit?", action="general", context="", history="")
+    assert res_fenced.answer == "Coverage is provided up to $50,000."
+    assert res_fenced.summary == "Policy limits coverage to $50k."
+
+    # 3. Malformed non-JSON response fallback
+    generator_malformed = GeminiGenerator(provider_pool=_MockPool("Plain unformatted text response from model."))
+    res_fallback = await generator_malformed.generate(query="What is the limit?", action="general", context="", history="")
+    assert "Plain unformatted text response" in res_fallback.answer
+    assert res_fallback.summary is None
+    assert res_fallback.key_points == []
+    assert res_fallback.insufficient_context is False

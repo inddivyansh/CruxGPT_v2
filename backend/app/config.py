@@ -42,7 +42,12 @@ class Settings(BaseSettings):
     chunk_overlap_chars: int = 400
 
     # Retrieval
-    retrieval_top_k: int = 6
+    retrieval_candidate_pool_k: int = 20
+    retrieval_top_k: int = 8
+
+    # Caching
+    response_cache_ttl_seconds: int = 3600
+    response_cache_max_size: int = 1000
 
 
 @lru_cache

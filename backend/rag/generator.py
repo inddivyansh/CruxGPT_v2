@@ -6,9 +6,9 @@ in code fences despite instructions not to) and falls back to a safe,
 clearly-labeled response rather than crashing or silently fabricating
 structure if parsing fails.
 """
+from dataclasses import dataclass, field
 import json
 import re
-from dataclasses import dataclass, field
 
 import google.generativeai as genai
 
@@ -20,6 +20,8 @@ from rag.prompt import SYSTEM_PROMPT, build_user_prompt
 @dataclass
 class GenerationResult:
     answer: str
+    summary: str | None = None
+    key_points: list[str] = field(default_factory=list)
     decision: str | None = None
     conditions: list[str] = field(default_factory=list)
     exclusions: list[str] = field(default_factory=list)
@@ -75,6 +77,8 @@ class GeminiGenerator:
             # rather than failing the whole request outright.
             return GenerationResult(
                 answer=raw_text.strip() or "I wasn't able to generate a response. Please try again.",
+                summary=None,
+                key_points=[],
                 insufficient_context=False,
                 confidence=None,
             )
@@ -85,8 +89,19 @@ class GeminiGenerator:
         except (TypeError, ValueError):
             confidence = None
 
+        summary = parsed.get("summary")
+        if isinstance(summary, str):
+            summary = summary.strip() or None
+        else:
+            summary = None
+
+        raw_key_points = parsed.get("key_points")
+        key_points = [str(kp).strip() for kp in raw_key_points if str(kp).strip()] if isinstance(raw_key_points, list) else []
+
         return GenerationResult(
             answer=parsed.get("answer", "").strip() or "No answer was generated.",
+            summary=summary,
+            key_points=key_points,
             decision=parsed.get("decision"),
             conditions=list(parsed.get("conditions") or []),
             exclusions=list(parsed.get("exclusions") or []),

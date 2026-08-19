@@ -50,6 +50,8 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
     const hasProcessedInitialQuery = useRef(false);
     const processedQuery = useRef('');
     const pollCleanupsRef = useRef({});
+    const conversationIdRef = useRef(initialConversationId);
+    const conversationCreationRef = useRef(null);
 
     const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     useEffect(() => {
@@ -62,6 +64,7 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
         (async () => {
             try {
                 const conversation = await api.getConversation(initialConversationId);
+                conversationIdRef.current = conversation.id;
                 setConversationId(conversation.id);
                 setMessages(
                     conversation.messages.map((m) => ({
@@ -93,6 +96,7 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
             documentIds,
             action,
         });
+        conversationIdRef.current = response.conversation_id;
         setConversationId(response.conversation_id);
         return response;
     }, [conversationId]);
@@ -180,7 +184,26 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
     };
 
     // --- BACKEND INTEGRATION POINT: real document upload + status polling ---
-    const handleFileAttachment = (event) => {
+    const getConversationIdForUpload = async () => {
+        if (conversationIdRef.current) return conversationIdRef.current;
+
+        if (!conversationCreationRef.current) {
+            conversationCreationRef.current = api
+                .createConversation()
+                .then((conversation) => {
+                    conversationIdRef.current = conversation.id;
+                    setConversationId(conversation.id);
+                    return conversation.id;
+                })
+                .finally(() => {
+                    conversationCreationRef.current = null;
+                });
+        }
+
+        return conversationCreationRef.current;
+    };
+
+    const handleFileAttachment = async (event) => {
         if (!isLoggedIn) {
             openLoginModal();
             event.target.value = '';
@@ -189,6 +212,8 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
 
         const files = Array.from(event.target.files);
         event.target.value = ''; // allow re-selecting the same file later
+
+        const validFiles = [];
 
         files.forEach((file) => {
             const localId = `${file.name}-${Date.now()}-${Math.random()}`;
@@ -202,10 +227,32 @@ const Chat = ({ taskSuggestions = [], commonQueries = [], initialQuery = '', ini
                 return;
             }
 
+            validFiles.push({ file, localId });
+        });
+
+        if (!validFiles.length) return;
+
+        let uploadConversationId;
+        try {
+            uploadConversationId = await getConversationIdForUpload();
+        } catch (err) {
+            setAttachedFiles((prev) => [
+                ...prev,
+                ...validFiles.map(({ file, localId }) => ({
+                    localId,
+                    file,
+                    status: 'failed',
+                    error: err.message || 'Could not create conversation.',
+                })),
+            ]);
+            return;
+        }
+
+        validFiles.forEach(({ file, localId }) => {
             setAttachedFiles((prev) => [...prev, { localId, file, status: 'uploading' }]);
 
             api
-                .uploadDocument(file)
+                .uploadDocument(file, uploadConversationId)
                 .then((doc) => {
                     setAttachedFiles((prev) =>
                         prev.map((f) => (f.localId === localId ? { ...f, documentId: doc.id, status: 'processing' } : f))

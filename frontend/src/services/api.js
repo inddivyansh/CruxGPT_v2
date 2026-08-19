@@ -167,9 +167,10 @@ export async function updateProfile(profile) {
 
 // --- Documents -------------------------------------------------------------
 
-export async function uploadDocument(file) {
+export async function uploadDocument(file, conversationId) {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('conversation_id', conversationId);
     return request('/api/documents/upload', { method: 'POST', body: formData });
 }
 
@@ -191,6 +192,13 @@ export async function sendMessage({ message, conversationId, documentIds = [], a
     return request('/api/chat', {
         method: 'POST',
         body: { message, conversation_id: conversationId ?? null, document_ids: documentIds, action },
+    });
+}
+
+export async function createConversation(title = null) {
+    return request('/api/conversations', {
+        method: 'POST',
+        body: title === null ? {} : { title },
     });
 }
 

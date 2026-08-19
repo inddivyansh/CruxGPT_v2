@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.database import init_db
 from app.errors import AppError
-from app.routes import admin, auth, chat, conversations, documents, feedback, suggestions, users
+from routes import admin, auth, chat, conversations, documents, feedback, suggestions, users
 
 
 @asynccontextmanager

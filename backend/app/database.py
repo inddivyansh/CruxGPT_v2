@@ -123,6 +123,7 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_user_table)
         await conn.run_sync(_migrate_document_conversation_id)
+        await conn.run_sync(_migrate_document_embedding_metadata)
         await conn.run_sync(_migrate_timestamp_columns)
 
 
@@ -221,6 +222,32 @@ def _migrate_document_conversation_id(sync_conn) -> None:
     sync_conn.execute(
         text("CREATE INDEX ix_documents_conversation_id ON documents (conversation_id)")
     )
+
+
+def _migrate_document_embedding_metadata(sync_conn) -> None:
+    """Add nullable duplicate-detection metadata without changing legacy rows."""
+
+    inspector = inspect(sync_conn)
+    if not inspector.has_table("documents"):
+        return
+
+    existing_columns = {column["name"] for column in inspector.get_columns("documents")}
+    columns = {
+        "content_sha256": "VARCHAR(64)",
+        "embedding_model": "VARCHAR(255)",
+    }
+    for column_name, column_type in columns.items():
+        if column_name not in existing_columns:
+            sync_conn.execute(text(f"ALTER TABLE documents ADD COLUMN {column_name} {column_type}"))
+
+    existing_indexes = {index["name"] for index in inspector.get_indexes("documents")}
+    if "ix_documents_user_content_sha256" not in existing_indexes:
+        sync_conn.execute(
+            text(
+                "CREATE INDEX ix_documents_user_content_sha256 "
+                "ON documents (user_id, content_sha256)"
+            )
+        )
 
 
 def _migrate_timestamp_columns(sync_conn) -> None:

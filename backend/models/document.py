@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -9,6 +9,7 @@ from models.user import _now, _uuid
 
 class Document(Base):
     __tablename__ = "documents"
+    __table_args__ = (Index("ix_documents_user_content_sha256", "user_id", "content_sha256"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), index=True)
@@ -20,6 +21,10 @@ class Document(Base):
     original_filename: Mapped[str] = mapped_column(String(255))  # never trusted for paths
     mime_type: Mapped[str] = mapped_column(String(100))
     file_size: Mapped[int] = mapped_column(Integer)
+    # Nullable for documents created before content-addressed deduplication.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Identifies the model that generated this document's stored chunk vectors.
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # uploaded -> processing -> indexed | failed
     status: Mapped[str] = mapped_column(String(20), default="uploaded")

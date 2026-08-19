@@ -30,6 +30,11 @@ async def retrieve_chunks(
     document_ids: list[str] | None = None,
     top_k: int | None = None,
 ) -> list[tuple[DocumentChunk, float]]:
+    # Callers resolve this list from the authenticated conversation. An empty
+    # conversation must never fall back to searching all of a user's chunks.
+    if not document_ids:
+        return []
+
     embedding_service = get_embedding_service()
     query_embedding = await embedding_service.embed_query(query)
     return await similarity_search(

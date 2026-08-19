@@ -32,12 +32,23 @@ async def _register(client, email="doc-user@example.com", registration_payload_f
     return resp.json()["access_token"]
 
 
+async def _create_conversation(client, token, title="Test conversation"):
+    resp = await client.post(
+        "/api/conversations",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"title": title},
+    )
+    return resp.json()["id"]
+
+
 @pytest.mark.asyncio
 async def test_upload_txt_document(client, registration_payload_factory):
     token = await _register(client, registration_payload_factory=registration_payload_factory)
+    conv_id = await _create_conversation(client, token)
     resp = await client.post(
         "/api/documents/upload",
         headers={"Authorization": f"Bearer {token}"},
+        data={"conversation_id": conv_id},
         files={"file": ("policy.txt", b"This is a test policy document.", "text/plain")},
     )
     assert resp.status_code == 201
@@ -49,9 +60,11 @@ async def test_upload_txt_document(client, registration_payload_factory):
 @pytest.mark.asyncio
 async def test_upload_rejects_unsupported_type(client, registration_payload_factory):
     token = await _register(client, registration_payload_factory=registration_payload_factory)
+    conv_id = await _create_conversation(client, token)
     resp = await client.post(
         "/api/documents/upload",
         headers={"Authorization": f"Bearer {token}"},
+        data={"conversation_id": conv_id},
         files={"file": ("virus.exe", b"MZ...", "application/x-msdownload")},
     )
     assert resp.status_code == 415
@@ -61,10 +74,12 @@ async def test_upload_rejects_unsupported_type(client, registration_payload_fact
 @pytest.mark.asyncio
 async def test_upload_rejects_oversized_file(client, registration_payload_factory):
     token = await _register(client, registration_payload_factory=registration_payload_factory)
+    conv_id = await _create_conversation(client, token)
     big_content = b"x" * (11 * 1024 * 1024)  # 11MB > 10MB default limit
     resp = await client.post(
         "/api/documents/upload",
         headers={"Authorization": f"Bearer {token}"},
+        data={"conversation_id": conv_id},
         files={"file": ("big.txt", big_content, "text/plain")},
     )
     assert resp.status_code == 413
@@ -74,7 +89,9 @@ async def test_upload_rejects_oversized_file(client, registration_payload_factor
 @pytest.mark.asyncio
 async def test_upload_requires_auth(client):
     resp = await client.post(
-        "/api/documents/upload", files={"file": ("policy.txt", b"hello", "text/plain")}
+        "/api/documents/upload",
+        data={"conversation_id": "any-id"},
+        files={"file": ("policy.txt", b"hello", "text/plain")},
     )
     assert resp.status_code == 401
 
@@ -83,10 +100,12 @@ async def test_upload_requires_auth(client):
 async def test_user_cannot_access_other_users_document(client, registration_payload_factory):
     token_a = await _register(client, "doc-a@example.com", registration_payload_factory)
     token_b = await _register(client, "doc-b@example.com", registration_payload_factory)
+    conv_id = await _create_conversation(client, token_a)
 
     upload = await client.post(
         "/api/documents/upload",
         headers={"Authorization": f"Bearer {token_a}"},
+        data={"conversation_id": conv_id},
         files={"file": ("policy.txt", b"secret content", "text/plain")},
     )
     doc_id = upload.json()["id"]
@@ -100,10 +119,12 @@ async def test_user_cannot_access_other_users_document(client, registration_payl
 async def test_list_documents_scoped_to_user(client, registration_payload_factory):
     token_a = await _register(client, "list-a@example.com", registration_payload_factory)
     token_b = await _register(client, "list-b@example.com", registration_payload_factory)
+    conv_a = await _create_conversation(client, token_a)
 
     await client.post(
         "/api/documents/upload",
         headers={"Authorization": f"Bearer {token_a}"},
+        data={"conversation_id": conv_a},
         files={"file": ("a.txt", b"content a", "text/plain")},
     )
 

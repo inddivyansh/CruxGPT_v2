@@ -11,7 +11,7 @@ import time
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.errors import ConversationNotFoundError
+from app.errors import ConversationNotFoundError, DocumentNotFoundError
 from models.conversation import Conversation
 from models.document import Document
 from models.message import Message
@@ -61,6 +61,30 @@ async def _last_user_message(db: AsyncSession, conversation_id: str) -> str | No
     return msg.content if msg else None
 
 
+async def _conversation_document_ids(
+    db: AsyncSession,
+    user_id: str,
+    conversation_id: str,
+    requested_document_ids: list[str],
+) -> list[str]:
+    """Resolve only documents owned by this user and attached to this conversation."""
+    requested_ids = list(dict.fromkeys(requested_document_ids))
+    stmt = select(Document.id).where(
+        Document.user_id == user_id,
+        Document.conversation_id == conversation_id,
+    )
+    if requested_ids:
+        result = await db.execute(stmt.where(Document.id.in_(requested_ids)))
+        accessible_ids = [row[0] for row in result.all()]
+        if len(accessible_ids) != len(requested_ids):
+            # Match the existing no-information-leak behavior for documents.
+            raise DocumentNotFoundError()
+        return accessible_ids
+
+    result = await db.execute(stmt)
+    return [row[0] for row in result.all()]
+
+
 async def answer_query(db: AsyncSession, user_id: str, payload: ChatRequest) -> ChatResponse:
     start = time.monotonic()
 
@@ -75,11 +99,17 @@ async def answer_query(db: AsyncSession, user_id: str, payload: ChatRequest) -> 
     await db.commit()
 
     retrieval_query = build_retrieval_query(payload.message, previous_user_message)
+    conversation_document_ids = await _conversation_document_ids(
+        db,
+        user_id,
+        conversation.id,
+        payload.document_ids,
+    )
     scored_chunks = await retrieve_chunks(
         db=db,
         user_id=user_id,
         query=retrieval_query,
-        document_ids=payload.document_ids or None,
+        document_ids=conversation_document_ids,
     )
 
     document_ids = list({c.document_id for c, _ in scored_chunks})
@@ -88,7 +118,7 @@ async def answer_query(db: AsyncSession, user_id: str, payload: ChatRequest) -> 
         doc_result = await db.execute(select(Document).where(Document.id.in_(document_ids)))
         document_names = {d.id: d.original_filename for d in doc_result.scalars().all()}
 
-    context_chunks = select_context_chunks(scored_chunks)
+    context_chunks = select_context_chunks(scored_chunks, document_names)
     context = format_context(context_chunks, document_names)
     history_text = format_history(history)
 

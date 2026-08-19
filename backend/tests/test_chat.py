@@ -52,13 +52,33 @@ async def _register(client, email, registration_payload_factory):
     return resp.json()["access_token"]
 
 
-async def _upload_and_index(client, token, filename="policy.txt", content=b"Knee surgery is covered under Surgical Coverage, subject to a 90-day waiting period."):
+async def _create_conversation(client, token, title="Test conversation"):
+    resp = await client.post(
+        "/api/conversations",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"title": title},
+    )
+    return resp.json()["id"]
+
+
+async def _upload_and_index(
+    client,
+    token,
+    conversation_id=None,
+    filename="policy.txt",
+    content=b"Knee surgery is covered under Surgical Coverage, subject to a 90-day waiting period.",
+):
+    if conversation_id is None:
+        conversation_id = await _create_conversation(client, token)
+
     resp = await client.post(
         "/api/documents/upload",
         headers={"Authorization": f"Bearer {token}"},
+        data={"conversation_id": conversation_id},
         files={"file": (filename, content, "text/plain")},
     )
-    return resp.json()["id"]
+    doc_id = resp.json()["id"]
+    return doc_id, conversation_id
 
 
 @pytest.mark.asyncio
@@ -70,19 +90,23 @@ async def test_chat_requires_auth(client):
 @pytest.mark.asyncio
 async def test_chat_answers_from_indexed_document(client, registration_payload_factory):
     token = await _register(client, "chat-user@example.com", registration_payload_factory)
-    doc_id = await _upload_and_index(client, token)
+    doc_id, conv_id = await _upload_and_index(client, token)
 
     resp = await client.post(
         "/api/chat",
         headers={"Authorization": f"Bearer {token}"},
-        json={"message": "Does this policy cover knee surgery?", "action": "search_policy"},
+        json={
+            "conversation_id": conv_id,
+            "message": "Does this policy cover knee surgery?",
+            "action": "search_policy",
+        },
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["decision"] == "Likely Covered"
     assert len(body["sources"]) >= 1
     assert body["sources"][0]["document_id"] == doc_id
-    assert "conversation_id" in body and "message_id" in body
+    assert body["conversation_id"] == conv_id and "message_id" in body
 
 
 @pytest.mark.asyncio
@@ -90,11 +114,16 @@ async def test_chat_never_returns_another_users_documents(client, registration_p
     token_a = await _register(client, "iso-a@example.com", registration_payload_factory)
     token_b = await _register(client, "iso-b@example.com", registration_payload_factory)
     await _upload_and_index(client, token_a)
+    conv_b = await _create_conversation(client, token_b)
 
     resp = await client.post(
         "/api/chat",
         headers={"Authorization": f"Bearer {token_b}"},
-        json={"message": "Does this policy cover knee surgery?", "action": "search_policy"},
+        json={
+            "conversation_id": conv_b,
+            "message": "Does this policy cover knee surgery?",
+            "action": "search_policy",
+        },
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -104,14 +133,15 @@ async def test_chat_never_returns_another_users_documents(client, registration_p
 @pytest.mark.asyncio
 async def test_conversation_persists_and_is_retrievable(client, registration_payload_factory):
     token = await _register(client, "conv-user@example.com", registration_payload_factory)
-    await _upload_and_index(client, token)
+    doc_id, conv_id = await _upload_and_index(client, token)
 
     chat_resp = await client.post(
         "/api/chat",
         headers={"Authorization": f"Bearer {token}"},
-        json={"message": "Does this policy cover knee surgery?"},
+        json={"conversation_id": conv_id, "message": "Does this policy cover knee surgery?"},
     )
     conversation_id = chat_resp.json()["conversation_id"]
+    assert conversation_id == conv_id
 
     list_resp = await client.get("/api/conversations", headers={"Authorization": f"Bearer {token}"})
     assert any(c["id"] == conversation_id for c in list_resp.json())
@@ -129,9 +159,11 @@ async def test_conversation_persists_and_is_retrievable(client, registration_pay
 @pytest.mark.asyncio
 async def test_feedback_submission(client, registration_payload_factory):
     token = await _register(client, "fb-user@example.com", registration_payload_factory)
-    await _upload_and_index(client, token)
+    doc_id, conv_id = await _upload_and_index(client, token)
     chat_resp = await client.post(
-        "/api/chat", headers={"Authorization": f"Bearer {token}"}, json={"message": "Coverage?"}
+        "/api/chat",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"conversation_id": conv_id, "message": "Coverage?"},
     )
     message_id = chat_resp.json()["message_id"]
 

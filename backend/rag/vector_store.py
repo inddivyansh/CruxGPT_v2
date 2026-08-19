@@ -29,11 +29,15 @@ async def similarity_search(
     user_id: str,
     query_embedding: list[float],
     top_k: int,
-    document_ids: list[str] | None = None,
+    document_ids: list[str],
 ) -> list[tuple[DocumentChunk, float]]:
-    stmt = select(DocumentChunk).where(DocumentChunk.user_id == user_id)
-    if document_ids:
-        stmt = stmt.where(DocumentChunk.document_id.in_(document_ids))
+    if not document_ids:
+        return []
+
+    stmt = select(DocumentChunk).where(
+        DocumentChunk.user_id == user_id,
+        DocumentChunk.document_id.in_(document_ids),
+    )
 
     result = await db.execute(stmt)
     candidates = result.scalars().all()

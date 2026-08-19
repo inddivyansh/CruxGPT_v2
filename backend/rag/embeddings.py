@@ -28,6 +28,7 @@ class GeminiEmbeddingService(EmbeddingService):
         from app.config import settings
 
         self.model = settings.gemini_embedding_model
+        self.output_dimensionality = settings.gemini_embedding_dimensions
         self.provider_pool = provider_pool or get_gemini_provider_pool()
 
     async def _embed(self, text: str, task_type: str) -> list[float]:
@@ -39,6 +40,7 @@ class GeminiEmbeddingService(EmbeddingService):
                     model=self.model,
                     content=text,
                     task_type=task_type,
+                    output_dimensionality=self.output_dimensionality,
                     client=provider.client,
                 ),
             )
@@ -55,18 +57,33 @@ class GeminiEmbeddingService(EmbeddingService):
         # The installed SDK batches up to 100 requests per API call. Reuse an
         # embedding for duplicate chunk text while preserving caller ordering.
         unique_texts = list(dict.fromkeys(texts))
+        unique_embeddings: list[list[float]] = []
+        batch_size = 100
+
         try:
-            result = await self.provider_pool.run(
-                operation="embedding",
-                model=self.model,
-                call=lambda provider: genai.embed_content(
+            for i in range(0, len(unique_texts), batch_size):
+                batch = unique_texts[i : i + batch_size]
+                result = await self.provider_pool.run(
+                    operation="embedding",
                     model=self.model,
-                    content=unique_texts,
-                    task_type="retrieval_document",
-                    client=provider.client,
-                ),
-            )
-            unique_embeddings = result["embedding"]
+                    call=lambda provider, b=batch: genai.embed_content(
+                        model=self.model,
+                        content=b,
+                        task_type="retrieval_document",
+                        output_dimensionality=self.output_dimensionality,
+                        client=provider.client,
+                    ),
+                )
+                batch_embeddings = result["embedding"]
+                if (
+                    len(batch) == 1
+                    and isinstance(batch_embeddings, list)
+                    and batch_embeddings
+                    and isinstance(batch_embeddings[0], (int, float))
+                ):
+                    unique_embeddings.append(batch_embeddings)
+                else:
+                    unique_embeddings.extend(batch_embeddings)
         except GeminiProviderUnavailableError as exc:
             raise EmbeddingFailedError("Gemini embedding service is temporarily unavailable. Please try again.") from exc
         except Exception as exc:

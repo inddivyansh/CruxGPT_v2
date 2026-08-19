@@ -12,12 +12,23 @@ own code from the retrieved chunks, not invented by the model - the model
 only needs to write the answer/decision/conditions/exclusions text.
 """
 import json
+from dataclasses import dataclass
 
 from models.chunk import DocumentChunk
 
 MAX_CONTEXT_CHARS = 12_000
 MAX_HISTORY_CHARS = 6_000
 MAX_HISTORY_MESSAGE_CHARS = 1_200
+
+
+@dataclass(frozen=True)
+class ContextChunk:
+    """Prompt-only chunk view; never mutates the stored SQLAlchemy chunk."""
+
+    document_id: str
+    text: str
+    page_number: int | None
+    section: str | None
 
 SYSTEM_PROMPT = """You are CRuX GPT, a document analysis assistant for insurance, legal, medical, HR, and compliance documents.
 
@@ -51,10 +62,12 @@ ACTION_HINTS = {
 
 
 def select_context_chunks(
-    chunks: list[tuple[DocumentChunk, float]], max_chars: int = MAX_CONTEXT_CHARS
-) -> list[tuple[DocumentChunk, float]]:
-    """Keep the highest-ranked non-duplicate chunks within a prompt budget."""
-    selected: list[tuple[DocumentChunk, float]] = []
+    chunks: list[tuple[DocumentChunk, float]],
+    document_names: dict[str, str],
+    max_chars: int = MAX_CONTEXT_CHARS,
+) -> list[tuple[ContextChunk, float]]:
+    """Keep high-ranked unique chunks within the exact rendered context budget."""
+    selected: list[tuple[ContextChunk, float]] = []
     seen_text: set[str] = set()
     used_chars = 0
 
@@ -62,28 +75,51 @@ def select_context_chunks(
         normalized_text = " ".join(chunk.text.split())
         if not normalized_text or normalized_text in seen_text:
             continue
-        if used_chars + len(chunk.text) > max_chars:
-            continue
-        selected.append((chunk, score))
+
+        doc_name = document_names.get(chunk.document_id, "Unknown document")
+        header = _source_header(chunk, score, doc_name)
+        separator_chars = 2 if selected else 0
+        remaining_text_chars = max_chars - used_chars - separator_chars - len(header) - 1
+        if remaining_text_chars <= 0:
+            break
+
+        prompt_text = chunk.text
+        if len(prompt_text) > remaining_text_chars:
+            # Keep a readable prefix while leaving the persisted chunk untouched.
+            cutoff = prompt_text.rfind(" ", 0, remaining_text_chars - 1)
+            cutoff = cutoff if cutoff > 0 else remaining_text_chars - 1
+            prompt_text = f"{prompt_text[:cutoff].rstrip()}…"
+
+        context_chunk = ContextChunk(
+            document_id=chunk.document_id,
+            text=prompt_text,
+            page_number=chunk.page_number,
+            section=chunk.section,
+        )
+        selected.append((context_chunk, score))
         seen_text.add(normalized_text)
-        used_chars += len(chunk.text)
+        used_chars += separator_chars + len(header) + 1 + len(prompt_text)
     return selected
 
 
-def format_context(chunks: list[tuple[DocumentChunk, float]], document_names: dict[str, str]) -> str:
+def _source_header(chunk: ContextChunk | DocumentChunk, score: float, doc_name: str) -> str:
+    location = []
+    if chunk.page_number:
+        location.append(f"page {chunk.page_number}")
+    if chunk.section:
+        location.append(f"section '{chunk.section}'")
+    location_str = f" ({', '.join(location)})" if location else ""
+    return f"[Source: {doc_name}{location_str}, relevance={score:.2f}]"
+
+
+def format_context(chunks: list[tuple[ContextChunk, float]], document_names: dict[str, str]) -> str:
     if not chunks:
         return "(No relevant document context was found for this query.)"
 
     parts = []
-    for i, (chunk, score) in enumerate(chunks, start=1):
+    for chunk, score in chunks:
         doc_name = document_names.get(chunk.document_id, "Unknown document")
-        location = []
-        if chunk.page_number:
-            location.append(f"page {chunk.page_number}")
-        if chunk.section:
-            location.append(f"section '{chunk.section}'")
-        location_str = f" ({', '.join(location)})" if location else ""
-        parts.append(f"[Source {i}: {doc_name}{location_str}, relevance={score:.2f}]\n{chunk.text}")
+        parts.append(f"{_source_header(chunk, score, doc_name)}\n{chunk.text}")
     return "\n\n".join(parts)
 
 

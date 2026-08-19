@@ -24,6 +24,26 @@ async def _fresh_db():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _mock_supabase_storage(monkeypatch):
+    storage = {}
+
+    async def fake_upload(storage_path: str, contents: bytes, mime_type: str) -> None:
+        storage[storage_path] = contents
+
+    async def fake_download(storage_path: str) -> bytes:
+        if storage_path not in storage:
+            raise RuntimeError(f"Storage path {storage_path} not found")
+        return storage[storage_path]
+
+    async def fake_delete(storage_path: str) -> None:
+        storage.pop(storage_path, None)
+
+    monkeypatch.setattr("services.document_service._upload_storage_object", fake_upload)
+    monkeypatch.setattr("services.document_service._download_storage_object", fake_download)
+    monkeypatch.setattr("services.document_service._delete_storage_object", fake_delete)
+
+
 @pytest_asyncio.fixture
 async def client():
     transport = ASGITransport(app=app)

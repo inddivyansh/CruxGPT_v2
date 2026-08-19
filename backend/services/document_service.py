@@ -8,11 +8,12 @@ ever used for display), size/type validation, private object storage,
 and per-user ownership checks before any read/delete.
 """
 import asyncio
+import hashlib
 import json
 import uuid
 
 from fastapi import UploadFile
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from supabase import create_client
 
@@ -146,6 +147,8 @@ async def save_upload(
         original_filename=file.filename or "document",
         mime_type=file.content_type,
         file_size=len(contents),
+        content_sha256=hashlib.sha256(contents).hexdigest(),
+        embedding_model=settings.gemini_embedding_model,
         status="uploaded",
         storage_path=storage_path,
     )
@@ -160,6 +163,108 @@ async def save_upload(
     return document
 
 
+def _has_valid_embedding(chunk: DocumentChunk) -> bool:
+    """Validate a stored vector before copying it to another document."""
+    if chunk.embedding_dim != settings.gemini_embedding_dimensions or chunk.embedding_dim <= 0:
+        return False
+    try:
+        embedding = json.loads(chunk.embedding_json)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(embedding, list)
+        and len(embedding) == chunk.embedding_dim
+        and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in embedding)
+    )
+
+
+def _chunks_are_complete(chunks: list[DocumentChunk]) -> bool:
+    return bool(chunks) and all(_has_valid_embedding(chunk) for chunk in chunks)
+
+
+async def _load_document_chunks(db: AsyncSession, document_id: str) -> list[DocumentChunk]:
+    result = await db.execute(
+        select(DocumentChunk)
+        .where(DocumentChunk.document_id == document_id)
+        .order_by(DocumentChunk.chunk_index)
+    )
+    return list(result.scalars().all())
+
+
+async def _prepare_document_for_indexing(db: AsyncSession, document_id: str) -> Document | None:
+    """Claim a document for indexing without keeping a database lock during AI calls."""
+    result = await db.execute(select(Document).where(Document.id == document_id).with_for_update())
+    document = result.scalar_one_or_none()
+    if document is None:
+        return None
+
+    existing_chunks = await _load_document_chunks(db, document.id)
+    if document.status == "indexed" and _chunks_are_complete(existing_chunks):
+        return None
+    if document.status == "processing":
+        return None
+
+    # A failed or incomplete attempt must not leave rows that a retry could duplicate.
+    if existing_chunks:
+        await db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document.id))
+    document.status = "processing"
+    document.error_message = None
+    document.embedding_model = settings.gemini_embedding_model
+    await db.commit()
+    return document
+
+
+async def _find_reusable_source_document(
+    db: AsyncSession, document: Document
+) -> tuple[Document, list[DocumentChunk]] | None:
+    """Find same-user, same-model, fully indexed content that can be copied safely."""
+    if not document.content_sha256:
+        return None
+
+    result = await db.execute(
+        select(Document)
+        .where(
+            Document.user_id == document.user_id,
+            Document.id != document.id,
+            Document.content_sha256 == document.content_sha256,
+            Document.status == "indexed",
+            Document.embedding_model == settings.gemini_embedding_model,
+        )
+        .order_by(Document.created_at.asc())
+    )
+    for source in result.scalars().all():
+        source_chunks = await _load_document_chunks(db, source.id)
+        if _chunks_are_complete(source_chunks):
+            return source, source_chunks
+    return None
+
+
+async def _copy_reusable_chunks(
+    db: AsyncSession,
+    source: Document,
+    source_chunks: list[DocumentChunk],
+    destination: Document,
+) -> None:
+    for chunk in source_chunks:
+        db.add(
+            DocumentChunk(
+                document_id=destination.id,
+                user_id=destination.user_id,
+                chunk_index=chunk.chunk_index,
+                text=chunk.text,
+                page_number=chunk.page_number,
+                section=chunk.section,
+                embedding_json=chunk.embedding_json,
+                embedding_dim=chunk.embedding_dim,
+            )
+        )
+    destination.page_count = source.page_count
+    destination.embedding_model = source.embedding_model
+    destination.status = "indexed"
+    destination.error_message = None
+    await db.commit()
+
+
 async def process_document(db: AsyncSession, document_id: str) -> None:
     """
     Runs the extract -> chunk -> embed -> index pipeline for a document.
@@ -167,15 +272,17 @@ async def process_document(db: AsyncSession, document_id: str) -> None:
     isn't blocked on (potentially slow) embedding calls. Any failure marks
     the document 'failed' with a message instead of leaving it stuck.
     """
-    result = await db.execute(select(Document).where(Document.id == document_id))
-    document = result.scalar_one_or_none()
+    document = await _prepare_document_for_indexing(db, document_id)
     if document is None:
         return
 
-    document.status = "processing"
-    await db.commit()
-
     try:
+        reusable_source = await _find_reusable_source_document(db, document)
+        if reusable_source is not None:
+            source, source_chunks = reusable_source
+            await _copy_reusable_chunks(db, source, source_chunks, document)
+            return
+
         contents = await _download_storage_object(document.storage_path)
         blocks = parse_document(contents, document.mime_type)
         chunks = chunk_blocks(blocks)
@@ -201,11 +308,17 @@ async def process_document(db: AsyncSession, document_id: str) -> None:
 
         page_numbers = [b.page_number for b in blocks if b.page_number]
         document.page_count = max(page_numbers) if page_numbers else None
+        document.embedding_model = settings.gemini_embedding_model
         document.status = "indexed"
         document.error_message = None
         await db.commit()
 
     except Exception as exc:
+        await db.rollback()
+        document_result = await db.execute(select(Document).where(Document.id == document_id))
+        document = document_result.scalar_one_or_none()
+        if document is None:
+            return
         document.status = "failed"
         document.error_message = str(exc)[:500]
         await db.commit()

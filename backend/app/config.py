@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     gemini_api_key_secondary: str = ""
     gemini_llm_model: str = "gemini-2.0-flash"
     gemini_embedding_model: str = "models/text-embedding-004"
+    gemini_embedding_dimensions: int = 3072
 
     # Supabase Storage (server-side only)
     supabase_url: str = ""

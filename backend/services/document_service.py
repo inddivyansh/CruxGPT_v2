@@ -18,12 +18,14 @@ from supabase import create_client
 
 from app.config import settings
 from app.errors import (
+    ConversationNotFoundError,
     DocumentNotFoundError,
     DocumentProcessingFailedError,
     FileTooLargeError,
     UnsupportedFileTypeError,
 )
 from models.chunk import DocumentChunk
+from models.conversation import Conversation
 from models.document import Document
 from rag.chunker import chunk_blocks
 from rag.embeddings import get_embedding_service
@@ -110,6 +112,17 @@ async def save_upload(
 ) -> Document:
     contents = await file.read()
     _validate_upload(file, len(contents))
+
+    # Serialize quota checks for this conversation in PostgreSQL. The lock is
+    # retained until the document metadata is committed below, so concurrent
+    # uploads cannot both pass the same 100 MiB check.
+    conversation_result = await db.execute(
+        select(Conversation)
+        .where(Conversation.id == conversation_id, Conversation.user_id == user_id)
+        .with_for_update()
+    )
+    if conversation_result.scalar_one_or_none() is None:
+        raise ConversationNotFoundError()
     await _validate_conversation_storage(db, user_id, conversation_id, len(contents))
 
     # Safe, unguessable, generated filename - the original filename is never
